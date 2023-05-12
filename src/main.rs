@@ -1,5 +1,5 @@
 use clap::Parser;
-use log::info;
+use tracing::info;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -10,7 +10,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
     let args = Args::parse();
-    info!("Running rog on port {}", args.port);
+    info!(port = args.port, "Running rog");
 }
