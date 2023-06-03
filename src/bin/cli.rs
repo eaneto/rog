@@ -16,6 +16,19 @@ enum Command {
         #[clap(long, short)]
         partitions: usize,
     },
+    Publish {
+        /// Log name
+        #[clap(long, short)]
+        log_name: String,
+
+        /// Partition to publish the data
+        #[clap(long, short)]
+        partition: usize,
+
+        /// Data to be published
+        #[clap(long, short)]
+        data: String,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -45,18 +58,76 @@ fn main() {
                 return;
             }
 
-            let mut buf = [0u8; 4];
-            match stream.read_exact(&mut buf) {
+            let mut buf = [0; 1024];
+            match stream.read(&mut buf) {
                 Ok(_) => {
-                    let ok = format!("OK{CRLF}");
-                    if buf == ok.as_bytes() {
+                    let ok = format!("+OK{CRLF}");
+                    if &buf[..5] == ok.as_bytes() {
                         println!("Created log {name} with {partitions} partitions");
                     } else {
-                        println!("Unable to create log\n{:?}", buf);
+                        println!("Unable to create log");
+                        let error_message = parse_error(&buf);
+                        println!("{error_message}");
                     }
                 }
                 Err(e) => println!("Unable to create log\n{e}"),
             }
         }
+        Command::Publish {
+            log_name,
+            partition,
+            data,
+        } => {
+            let command = format!("1{partition}{CRLF}{log_name}{CRLF}{data}{CRLF}");
+            let command = command.as_bytes();
+            if let Err(e) = stream.write_all(command) {
+                println!("Unable to publish to log\n{e}");
+                return;
+            }
+
+            let mut buf = [0; 1024];
+            match stream.read(&mut buf) {
+                Ok(_) => {
+                    let ok = format!("+OK{CRLF}");
+                    if &buf[0..5] == ok.as_bytes() {
+                        println!(
+                            "Successfully published to log {log_name} to partition {partition}"
+                        );
+                    } else {
+                        println!("Unable to publish to log",);
+                        let error_message = parse_error(&buf);
+                        println!("{error_message}");
+                    }
+                }
+                Err(e) => println!("Unable to publish to log\n{e}"),
+            }
+        }
     }
+}
+
+fn parse_error(buf: &[u8]) -> String {
+    let start = 1;
+    let end = buf.len() - 1;
+    let index = match read_until_delimiter(buf, start, end) {
+        Ok(index) => index,
+        Err(index) => {
+            panic!("Unparseable command at index {index}");
+        }
+    };
+    String::from_utf8_lossy(&buf[start..index]).to_string()
+}
+
+fn read_until_delimiter(buf: &[u8], start: usize, end: usize) -> Result<usize, i64> {
+    let delimiter = CRLF.as_bytes();
+    for i in start..end {
+        match buf.get(i..(i + delimiter.len())) {
+            Some(slice) => {
+                if slice == delimiter {
+                    return Ok(i);
+                }
+            }
+            None => return Err(i as i64),
+        }
+    }
+    Err(-1)
 }
