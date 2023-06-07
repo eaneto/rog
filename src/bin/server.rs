@@ -1,20 +1,17 @@
 use atoi::atoi;
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, env, sync::Arc, time::SystemTime};
 
 use bytes::{BufMut, BytesMut};
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    fs::{self, File, OpenOptions},
+    io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{
         mpsc::{self, Receiver, Sender},
         RwLock,
     },
-    time::sleep,
 };
 use tracing::{debug, error, info, trace, warn};
 
@@ -46,19 +43,36 @@ enum Command {
     Unknown,
 }
 
-#[derive(Debug)]
-struct Message {
+#[derive(Debug, Serialize, Deserialize)]
+struct InternalMessage {
+    log_name: String,
     partition: usize,
     data: BytesMut,
-    timestamp: Instant,
+    timestamp: SystemTime,
+}
+
+impl InternalMessage {
+    fn new(log_name: String, partition: usize, data: BytesMut) -> InternalMessage {
+        InternalMessage {
+            log_name,
+            partition,
+            data,
+            timestamp: SystemTime::now(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Message {
+    data: BytesMut,
+    timestamp: SystemTime,
 }
 
 impl Message {
-    fn new(partition: usize, data: BytesMut) -> Message {
+    fn new(internal_message: InternalMessage) -> Message {
         Message {
-            partition,
-            data,
-            timestamp: Instant::now(),
+            data: internal_message.data,
+            timestamp: internal_message.timestamp,
         }
     }
 }
@@ -66,11 +80,15 @@ impl Message {
 #[derive(Debug)]
 struct CommitLog {
     name: String,
-    senders: Vec<Sender<Message>>,
+    number_of_partitions: usize,
+    senders: Vec<Sender<InternalMessage>>,
 }
 
 impl CommitLog {
-    fn new(name: String, number_of_partitions: usize) -> (CommitLog, Vec<Receiver<Message>>) {
+    pub fn new(
+        name: String,
+        number_of_partitions: usize,
+    ) -> (CommitLog, Vec<Receiver<InternalMessage>>) {
         let mut senders = Vec::new();
         let mut receivers = Vec::new();
         for _ in 0..number_of_partitions {
@@ -79,23 +97,73 @@ impl CommitLog {
             senders.push(tx);
             receivers.push(rx);
         }
-        (CommitLog { name, senders }, receivers)
+        (
+            CommitLog {
+                name,
+                number_of_partitions,
+                senders,
+            },
+            receivers,
+        )
+    }
+
+    pub async fn create_log_files(&self) -> Result<(), &str> {
+        let rog_home = match env::var("ROG_HOME") {
+            Ok(path) => path,
+            Err(_) => return Err("ROG_HOME environment variable not set"),
+        };
+
+        match fs::create_dir_all(format!("{rog_home}/{}", self.name)).await {
+            Ok(_) => debug!("Successfully created rog and log directories"),
+            Err(e) => {
+                error!("Unable to create rog and log directory {e}");
+                return Err("Unable to create rog and log directory");
+            }
+        }
+
+        for partition in 0..self.number_of_partitions {
+            match File::create(format!("{rog_home}/{}/{partition}.log", self.name)).await {
+                Ok(_) => debug!("Successfully created log file for partition {partition}"),
+                Err(e) => {
+                    error!("Unable to create log file for partition {partition} {e}");
+                    return Err("Unable to create log file for partition {partition}");
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
 /// Initialize a list a receivers to run in background tasks.
-fn setup_receivers(receivers: Vec<Receiver<Message>>) {
+fn setup_receivers(receivers: Vec<Receiver<InternalMessage>>) {
     for mut receiver in receivers {
         tokio::spawn(async move {
-            loop {
-                // TODO Micro-batching
-                while let Some(message) = receiver.recv().await {
-                    sleep(Duration::from_millis(1000)).await;
-                    debug!(
-                        "Received message {:?} on partition {:?} with timestamp {:?}",
-                        message.data, message.partition, message.timestamp
-                    );
-                }
+            // TODO Micro-batching
+            while let Some(internal_message) = receiver.recv().await {
+                let partition = internal_message.partition;
+                let log_name = internal_message.log_name.clone();
+                let message = Message::new(internal_message);
+
+                let encoded = bincode::serialize(&message).unwrap();
+                let rog_home = match env::var("ROG_HOME") {
+                    Ok(path) => path,
+                    Err(_) => panic!("ROG_HOME enrivonment variable not set"),
+                };
+
+                let log_file_name = format!("{rog_home}/{}/{}.log", log_name, partition);
+                let result = OpenOptions::new().append(true).open(log_file_name).await;
+                let mut log_file = match result {
+                    Ok(file) => file,
+                    Err(e) => {
+                        panic!("Unable to open log file for writing {e}");
+                    }
+                };
+                log_file.write_all(&encoded).await.unwrap();
+                debug!(
+                    "Received message {:?} on partition {:?} with timestamp {:?}",
+                    message.data, partition, message.timestamp
+                );
             }
         });
     }
@@ -110,7 +178,6 @@ async fn main() {
     let args = Args::parse();
     info!(port = args.port, "Running rog");
 
-    // TODO Produce to log
     // TODO Subscribe to log
     // TODO Enable multiple subscribers to same log
     // TODO Distribute writes to multiple nodes
@@ -121,8 +188,35 @@ async fn main() {
     };
 
     let logs = Arc::new(RwLock::new(HashMap::<String, CommitLog>::new()));
+    load_logs(logs.clone()).await;
 
     handle_connections(listener, logs).await;
+}
+
+async fn load_logs(logs: Logs) {
+    let rog_home = match env::var("ROG_HOME") {
+        Ok(path) => path,
+        Err(e) => panic!("ROG_HOME enrivonment variable not set {e}"),
+    };
+
+    let mut dir = match fs::read_dir(&rog_home).await {
+        Ok(dir) => dir,
+        Err(e) => match e.kind() {
+            io::ErrorKind::NotFound => return,
+            _ => panic!("Unable to read {rog_home}\n{e}"),
+        },
+    };
+
+    while let Some(entry) = dir.next_entry().await.unwrap() {
+        let file_name = entry.file_name();
+        let log_name = file_name.to_string_lossy();
+        let partitions = std::fs::read_dir(format!("{rog_home}/{log_name}"))
+            .unwrap()
+            .count();
+        let (commit_log, receivers) = CommitLog::new(log_name.to_string(), partitions);
+        setup_receivers(receivers);
+        logs.write().await.insert(log_name.to_string(), commit_log);
+    }
 }
 
 async fn handle_connections(listener: TcpListener, logs: Logs) {
@@ -176,13 +270,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     };
 
     let response = match command {
-        Command::Create { name, partitions } => {
-            let (commit_log, receivers) = CommitLog::new(name.to_string(), partitions);
-            setup_receivers(receivers);
-            logs.write().await.insert(name.to_string(), commit_log);
-            debug!(name = name, partitions = partitions, "Log created");
-            format!("+OK{CRLF}")
-        }
+        Command::Create { name, partitions } => create_log(logs, name, partitions).await,
         Command::Publish {
             log_name,
             partition,
@@ -197,13 +285,32 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     send_response(&mut stream, response).await;
 }
 
+async fn create_log(logs: Logs, name: String, partitions: usize) -> String {
+    if logs.read().await.contains_key(&name) {
+        return format!("-Log {name} already exists{CRLF}");
+    }
+
+    let (commit_log, receivers) = CommitLog::new(name.to_string(), partitions);
+    match commit_log.create_log_files().await {
+        Ok(()) => {
+            setup_receivers(receivers);
+            logs.write().await.insert(name.to_string(), commit_log);
+            debug!(name = name, partitions = partitions, "Log created");
+            format!("+OK{CRLF}")
+        }
+        Err(e) => {
+            format!("-{e}{CRLF}")
+        }
+    }
+}
+
 async fn publish_message(logs: Logs, log_name: String, partition: usize, data: BytesMut) -> String {
     match logs.read().await.get(&log_name) {
         Some(log) => {
-            let message = Message::new(partition, data);
+            let message = InternalMessage::new(log.name.clone(), partition, data);
             if partition >= log.senders.len() {
                 return format!(
-                    "-Trying to access partition {partition} but log {log_name} has {} partitions {CRLF}",
+                    "-Trying to access partition {partition} but log {log_name} has {} partitions{CRLF}",
                     log.senders.len()
                 );
             }
