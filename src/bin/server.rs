@@ -1,17 +1,16 @@
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::BytesMut;
 use clap::Parser;
 use tokio::{
-    fs,
-    io::{self, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::RwLock,
 };
 use tracing::{debug, error, info, trace, warn};
 
 use rog::command::{parse_command, Command, CRLF};
-use rog::log::{setup_receivers, CommitLog, InternalMessage, Logs};
+use rog::log::{load_logs, CommitLog, InternalMessage, Logs};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -40,32 +39,6 @@ async fn main() {
     load_logs(logs.clone()).await;
 
     handle_connections(listener, logs).await;
-}
-
-async fn load_logs(logs: Logs) {
-    let rog_home = match env::var("ROG_HOME") {
-        Ok(path) => path,
-        Err(e) => panic!("ROG_HOME enrivonment variable not set {e}"),
-    };
-
-    let mut dir = match fs::read_dir(&rog_home).await {
-        Ok(dir) => dir,
-        Err(e) => match e.kind() {
-            io::ErrorKind::NotFound => return,
-            _ => panic!("Unable to read {rog_home}\n{e}"),
-        },
-    };
-
-    while let Some(entry) = dir.next_entry().await.unwrap() {
-        let file_name = entry.file_name();
-        let log_name = file_name.to_string_lossy();
-        let partitions = std::fs::read_dir(format!("{rog_home}/{log_name}"))
-            .unwrap()
-            .count();
-        let (commit_log, receivers) = CommitLog::new(log_name.to_string(), partitions);
-        setup_receivers(receivers);
-        logs.write().await.insert(log_name.to_string(), commit_log);
-    }
 }
 
 async fn handle_connections(listener: TcpListener, logs: Logs) {
@@ -142,7 +115,7 @@ async fn create_log(logs: Logs, name: String, partitions: usize) -> String {
     let (commit_log, receivers) = CommitLog::new(name.to_string(), partitions);
     match commit_log.create_log_files().await {
         Ok(()) => {
-            setup_receivers(receivers);
+            CommitLog::setup_receivers(receivers);
             logs.write().await.insert(name.to_string(), commit_log);
             debug!(name = name, partitions = partitions, "Log created");
             format!("+OK{CRLF}")
