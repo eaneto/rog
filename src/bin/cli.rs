@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use rog::command::read_until_delimiter;
+use rog::command::{read_until_delimiter, CRLF};
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -41,8 +41,6 @@ struct Args {
     #[clap(subcommand)]
     command: Command,
 }
-
-const CRLF: &str = "\r\n";
 
 fn main() {
     let args = Args::parse();
