@@ -4,6 +4,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
+use rog::command::read_until_delimiter;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -115,19 +116,4 @@ fn parse_error(buf: &[u8]) -> String {
         }
     };
     String::from_utf8_lossy(&buf[start..index]).to_string()
-}
-
-fn read_until_delimiter(buf: &[u8], start: usize, end: usize) -> Result<usize, i64> {
-    let delimiter = CRLF.as_bytes();
-    for i in start..end {
-        match buf.get(i..(i + delimiter.len())) {
-            Some(slice) => {
-                if slice == delimiter {
-                    return Ok(i);
-                }
-            }
-            None => return Err(i as i64),
-        }
-    }
-    Err(-1)
 }
