@@ -6,7 +6,7 @@ use tokio::{
     fs::{self, File, OpenOptions},
     io::{self, AsyncWriteExt},
     sync::{
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, error::SendError, Receiver, Sender},
         RwLock,
     },
 };
@@ -15,8 +15,8 @@ use tracing::{debug, error};
 #[derive(Debug)]
 pub struct CommitLog {
     pub name: String,
-    number_of_partitions: usize,
-    pub senders: Vec<Sender<InternalMessage>>,
+    pub partitions: usize,
+    senders: Vec<Sender<InternalMessage>>,
 }
 
 impl CommitLog {
@@ -35,7 +35,7 @@ impl CommitLog {
         (
             CommitLog {
                 name,
-                number_of_partitions,
+                partitions: number_of_partitions,
                 senders,
             },
             receivers,
@@ -56,7 +56,7 @@ impl CommitLog {
             }
         }
 
-        for partition in 0..self.number_of_partitions {
+        for partition in 0..self.partitions {
             match File::create(format!("{rog_home}/{}/{partition}.log", self.name)).await {
                 Ok(_) => debug!("Successfully created log file for partition {partition}"),
                 Err(e) => {
@@ -67,6 +67,13 @@ impl CommitLog {
         }
 
         Ok(())
+    }
+
+    pub async fn send_message(
+        &self,
+        message: InternalMessage,
+    ) -> Result<(), SendError<InternalMessage>> {
+        self.senders[message.partition].send(message).await
     }
 
     /// Initialize a list a receivers to run in background tasks.
@@ -180,6 +187,24 @@ mod tests {
         assert_eq!(receivers.len(), partitions);
         assert_eq!(commit_log.senders.len(), partitions);
         assert_eq!(commit_log.name, log_name);
-        assert_eq!(commit_log.number_of_partitions, partitions);
+        assert_eq!(commit_log.partitions, partitions);
+    }
+
+    #[tokio::test]
+    async fn send_message_to_partition() {
+        let log_name = "log.name".to_string();
+        let partitions = 10;
+
+        let (commit_log, mut receivers) = CommitLog::new(log_name.clone(), partitions);
+        let message = InternalMessage::new(log_name.clone(), 0, BytesMut::new());
+        let result = commit_log.send_message(message).await;
+
+        assert!(result.is_ok());
+
+        let message = receivers[0].recv().await.unwrap();
+        assert_eq!(message.log_name, log_name);
+        assert_eq!(message.partition, 0);
+        assert_eq!(message.data, BytesMut::new());
+        assert!(message.timestamp < SystemTime::now());
     }
 }

@@ -130,13 +130,13 @@ async fn publish_message(logs: Logs, log_name: String, partition: usize, data: B
     match logs.read().await.get(&log_name) {
         Some(log) => {
             let message = InternalMessage::new(log.name.clone(), partition, data);
-            if partition >= log.senders.len() {
+            if partition >= log.partitions {
                 return format!(
                     "-Trying to access partition {partition} but log {log_name} has {} partitions{CRLF}",
-                    log.senders.len()
+                    log.partitions
                 );
             }
-            match log.senders[partition].send(message).await {
+            match log.send_message(message).await {
                 Ok(_) => {
                     debug!(
                         log_name = log_name,
