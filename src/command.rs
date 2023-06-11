@@ -20,7 +20,10 @@ pub enum Command {
         partition: usize,
         data: BytesMut,
     },
-    Fetch,
+    Fetch {
+        log_name: String,
+        partition: usize,
+    },
     Unknown,
 }
 
@@ -28,7 +31,7 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, String> {
     match buf[0] {
         CREATE_LOG_COMMAND_BYTE => parse_create_log_command(buf),
         PUBLISH_COMMAND_BYTE => parse_publish_log_command(buf),
-        FETCH_COMMAND_BYTE => Ok(Command::Fetch),
+        FETCH_COMMAND_BYTE => parse_fetch_log_command(buf),
         _ => Ok(Command::Unknown),
     }
 }
@@ -121,6 +124,43 @@ fn parse_publish_log_command(buf: &[u8]) -> Result<Command, String> {
     })
 }
 
+fn parse_fetch_log_command(buf: &[u8]) -> Result<Command, String> {
+    let start = 1;
+    let end = buf.len() - 1;
+    let index = match read_until_delimiter(buf, start, end) {
+        Ok(index) => index,
+        Err(index) => {
+            error!(index = index, "Unparseable command");
+            return Err("Unparseable command at index".to_string());
+        }
+    };
+
+    let partition = &buf[start..index];
+    let partition = match atoi::<usize>(partition) {
+        Some(partitions) => partitions,
+        None => {
+            error!("Invalid partition value, unable to parse to unsigned integer");
+            return Err("Invalid partition value, unable to parse to unsigned integer".to_string());
+        }
+    };
+
+    let start = index + 2;
+    let index = match read_until_delimiter(buf, start, end) {
+        Ok(index) => index,
+        Err(index) => {
+            error!(index = index, "Unparseable command");
+            return Err("Unparseable command at index".to_string());
+        }
+    };
+    let log_name = &buf[start..index];
+    let log_name = String::from_utf8_lossy(log_name);
+
+    Ok(Command::Fetch {
+        log_name: log_name.to_string(),
+        partition,
+    })
+}
+
 pub fn read_until_delimiter(buf: &[u8], start: usize, end: usize) -> Result<usize, i64> {
     let delimiter = CRLF.as_bytes();
     for i in start..end {
@@ -141,7 +181,7 @@ mod tests {
     use crate::command::*;
 
     #[test]
-    fn test_parse_create_log_command() {
+    fn parse_create_log_command() {
         let buf = "010\r\nsome.log\r\n".as_bytes();
         let command = parse_command(buf);
 
@@ -156,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_create_log_command_with_negative_partition_number() {
+    fn parse_create_log_command_with_negative_partition_number() {
         let buf = "0-1\r\nsome.log\r\n".as_bytes();
         let command = parse_command(buf);
 
@@ -164,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_create_log_command_with_invalid_partition_number() {
+    fn parse_create_log_command_with_invalid_partition_number() {
         let buf = "0aa\r\nsome.log\r\n".as_bytes();
         let command = parse_command(buf);
 
@@ -172,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_create_log_command_without_log_name() {
+    fn parse_create_log_command_without_log_name() {
         let buf = "010\r\n".as_bytes();
         let command = parse_command(buf);
 
@@ -180,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_create_log_command_without_crlf_after_log_name() {
+    fn parse_create_log_command_without_crlf_after_log_name() {
         let buf = "010\r\nsome.log".as_bytes();
         let command = parse_command(buf);
 
@@ -188,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unknown_command() {
+    fn parse_unknown_command() {
         let buf = "3example".as_bytes();
         let command = parse_command(buf);
 
