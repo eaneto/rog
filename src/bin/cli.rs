@@ -30,6 +30,15 @@ enum Command {
         #[clap(long, short)]
         data: String,
     },
+    Fetch {
+        /// Log name
+        #[clap(long, short)]
+        log_name: String,
+
+        /// Partition to publish the data
+        #[clap(long, short)]
+        partition: usize,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -99,6 +108,26 @@ fn main() {
                     }
                 }
                 Err(e) => println!("Unable to publish to log\n{e}"),
+            }
+        }
+        Command::Fetch {
+            log_name,
+            partition,
+        } => {
+            let command = format!("2{partition}{CRLF}{log_name}{CRLF}");
+            let command = command.as_bytes();
+            if let Err(e) = stream.write_all(command) {
+                println!("Unable to fetch log\n{e}");
+                return;
+            }
+
+            let mut buf = [0; 1024];
+            match stream.read(&mut buf) {
+                Ok(_) => {
+                    let response = String::from_utf8_lossy(&buf);
+                    println!("{response}");
+                }
+                Err(e) => println!("Unable to fetch log\n{e}"),
             }
         }
     }

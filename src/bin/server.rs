@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use clap::Parser;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -26,7 +26,6 @@ async fn main() {
     let args = Args::parse();
     info!(port = args.port, "Running rog");
 
-    // TODO Subscribe to log
     // TODO Enable multiple subscribers to same log
     // TODO Distribute writes to multiple nodes
 
@@ -86,7 +85,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
         Ok(command) => command,
         Err(e) => {
             let response = format!("-{e}{CRLF}");
-            send_response(&mut stream, response).await;
+            send_response(&mut stream, response.as_bytes().to_vec()).await;
             return;
         }
     };
@@ -98,43 +97,58 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
             partition,
             data,
         } => publish_message(logs, log_name, partition, data).await,
+        Command::Fetch {
+            log_name,
+            partition,
+        } => fetch_log(logs, log_name, partition).await,
         _ => {
             debug!("command not created yet");
-            format!("-Command not created yet{CRLF}")
+            let response = format!("-Command not created yet{CRLF}");
+            response.as_bytes().to_vec()
         }
     };
 
     send_response(&mut stream, response).await;
 }
 
-async fn create_log(logs: Logs, name: String, partitions: usize) -> String {
+async fn create_log(logs: Logs, name: String, partitions: usize) -> Vec<u8> {
     if logs.read().await.contains_key(&name) {
-        return format!("-Log {name} already exists{CRLF}");
+        let response = format!("-Log {name} already exists{CRLF}");
+        return response.as_bytes().to_vec();
     }
 
     let (commit_log, receivers) = CommitLog::new(name.to_string(), partitions);
     match commit_log.create_log_files().await {
         Ok(()) => {
-            CommitLog::setup_receivers(receivers);
+            CommitLog::setup_receivers(receivers, commit_log.name.clone());
             logs.write().await.insert(name.to_string(), commit_log);
             debug!(name = name, partitions = partitions, "Log created");
-            format!("+OK{CRLF}")
+            let response = format!("+OK{CRLF}");
+            response.as_bytes().to_vec()
         }
         Err(e) => {
-            format!("-{e}{CRLF}")
+            let response = format!("-{e}{CRLF}");
+            response.as_bytes().to_vec()
         }
     }
 }
 
-async fn publish_message(logs: Logs, log_name: String, partition: usize, data: BytesMut) -> String {
+async fn publish_message(
+    logs: Logs,
+    log_name: String,
+    partition: usize,
+    data: BytesMut,
+) -> Vec<u8> {
     match logs.read().await.get(&log_name) {
         Some(log) => {
-            let message = InternalMessage::new(log.name.clone(), partition, data);
+            let message = InternalMessage::new(partition, data);
             if partition >= log.partitions {
-                return format!(
+                let response = format!(
                     "-Trying to access partition {partition} but log {log_name} has {} partitions{CRLF}",
                     log.partitions
                 );
+                // TODO Change to response.bytes()
+                return response.as_bytes().to_vec();
             }
             match log.send_message(message).await {
                 Ok(_) => {
@@ -143,7 +157,8 @@ async fn publish_message(logs: Logs, log_name: String, partition: usize, data: B
                         partition = partition,
                         "Successfully published message"
                     );
-                    format!("+OK{CRLF}")
+                    let response = format!("+OK{CRLF}");
+                    response.as_bytes().to_vec()
                 }
                 Err(e) => {
                     error!(
@@ -152,16 +167,40 @@ async fn publish_message(logs: Logs, log_name: String, partition: usize, data: B
                         "Unable to publish message {:?}",
                         e
                     );
-                    format!("-Unable to send message to channel{CRLF}")
+                    let response = format!("-Unable to send message to channel{CRLF}");
+                    response.as_bytes().to_vec()
                 }
             }
         }
-        None => format!("-No log registered with name {log_name}{CRLF}"),
+        None => {
+            let response = format!("-No log registered with name {log_name}{CRLF}");
+            response.as_bytes().to_vec()
+        }
     }
 }
 
-async fn send_response(stream: &mut TcpStream, response: String) {
-    match stream.write_all(response.as_bytes()).await {
+async fn fetch_log(logs: Logs, log_name: String, partition: usize) -> Vec<u8> {
+    match logs.read().await.get(&log_name) {
+        Some(log) => {
+            let data = match log.fetch_message(partition).await {
+                Ok(data) => data,
+                Err(e) => {
+                    let mut data = BytesMut::with_capacity(e.len());
+                    data.put(e.as_bytes());
+                    data
+                }
+            };
+            data.to_vec()
+        }
+        None => {
+            let response = format!("-No log registered with name {log_name}{CRLF}");
+            response.as_bytes().to_vec()
+        }
+    }
+}
+
+async fn send_response(stream: &mut TcpStream, response: Vec<u8>) {
+    match stream.write_all(&response).await {
         Ok(()) => {
             trace!("Successfully sent response to client")
         }
