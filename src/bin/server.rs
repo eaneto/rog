@@ -26,7 +26,6 @@ async fn main() {
     let args = Args::parse();
     info!(port = args.port, "Running rog");
 
-    // TODO Enable multiple subscribers to same log
     // TODO Distribute writes to multiple nodes
 
     let listener = match TcpListener::bind(format!("127.0.0.1:{}", args.port)).await {
@@ -100,7 +99,8 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
         Command::Fetch {
             log_name,
             partition,
-        } => fetch_log(logs, log_name, partition).await,
+            group,
+        } => fetch_log(logs, log_name, partition, group).await,
         _ => {
             debug!("command not created yet");
             let response = format!("-Command not created yet{CRLF}");
@@ -179,10 +179,10 @@ async fn publish_message(
     }
 }
 
-async fn fetch_log(logs: Logs, log_name: String, partition: usize) -> Vec<u8> {
+async fn fetch_log(logs: Logs, log_name: String, partition: usize, group: String) -> Vec<u8> {
     match logs.read().await.get(&log_name) {
         Some(log) => {
-            let data = match log.fetch_message(partition).await {
+            let data = match log.fetch_message(partition, group).await {
                 Ok(data) => data,
                 Err(e) => {
                     let mut data = BytesMut::with_capacity(e.len());

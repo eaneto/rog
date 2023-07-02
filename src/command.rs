@@ -23,6 +23,7 @@ pub enum Command {
     Fetch {
         log_name: String,
         partition: usize,
+        group: String,
     },
     Unknown,
 }
@@ -155,9 +156,21 @@ fn parse_fetch_log_command(buf: &[u8]) -> Result<Command, String> {
     let log_name = &buf[start..index];
     let log_name = String::from_utf8_lossy(log_name);
 
+    let start = index + 2;
+    let index = match read_until_delimiter(buf, start, end) {
+        Ok(index) => index,
+        Err(index) => {
+            error!(index = index, "Unparseable command");
+            return Err("Unparseable command at index".to_string());
+        }
+    };
+    let group = &buf[start..index];
+    let group = String::from_utf8_lossy(group);
+
     Ok(Command::Fetch {
         log_name: log_name.to_string(),
         partition,
+        group: group.to_string(),
     })
 }
 
@@ -222,6 +235,51 @@ mod tests {
     #[test]
     fn parse_create_log_command_without_crlf_after_log_name() {
         let buf = "010\r\nsome.log".as_bytes();
+        let command = parse_command(buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_publish_command() {
+        let content = String::from("event-content");
+        let buf = format!("110\r\nevents.log\r\n{content}\r\n");
+        let buf = buf.as_bytes();
+        let command = parse_command(buf);
+
+        let mut data = BytesMut::with_capacity(content.len());
+        data.put(content.as_bytes());
+
+        assert!(command.is_ok());
+        assert_eq!(
+            command.unwrap(),
+            Command::Publish {
+                log_name: "events.log".to_string(),
+                partition: 10,
+                data,
+            }
+        )
+    }
+
+    #[test]
+    fn parse_fetch_command() {
+        let buf = "210\r\nevents.log\r\ngroup-name\r\n".as_bytes();
+        let command = parse_command(buf);
+
+        assert!(command.is_ok());
+        assert_eq!(
+            command.unwrap(),
+            Command::Fetch {
+                log_name: "events.log".to_string(),
+                partition: 10,
+                group: "group-name".to_string(),
+            }
+        )
+    }
+
+    #[test]
+    fn parse_fetch_command_without_group() {
+        let buf = "210\r\nevents.log\r\n".as_bytes();
         let command = parse_command(buf);
 
         assert!(command.is_err());
