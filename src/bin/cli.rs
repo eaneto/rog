@@ -38,6 +38,10 @@ enum Command {
         /// Partition to publish the data
         #[clap(long, short)]
         partition: usize,
+
+        /// Consumer group
+        #[clap(long, short)]
+        group: String,
     },
 }
 
@@ -113,8 +117,9 @@ fn main() {
         Command::Fetch {
             log_name,
             partition,
+            group,
         } => {
-            let command = format!("2{partition}{CRLF}{log_name}{CRLF}");
+            let command = format!("2{partition}{CRLF}{log_name}{CRLF}{group}{CRLF}");
             let command = command.as_bytes();
             if let Err(e) = stream.write_all(command) {
                 println!("Unable to fetch log\n{e}");

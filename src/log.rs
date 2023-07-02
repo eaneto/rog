@@ -112,10 +112,10 @@ impl CommitLog {
         }
     }
 
-    pub async fn fetch_message(&self, partition: usize) -> Result<BytesMut, &str> {
-        self.create_offset_files().await?;
+    pub async fn fetch_message(&self, partition: usize, group: String) -> Result<BytesMut, &str> {
+        self.create_offset_files(&group).await?;
 
-        let mut offset: usize = self.load_offset(partition).await;
+        let mut offset: usize = self.load_offset(partition, &group).await;
 
         // TODO Instead of loading the whole log in memory this
         // function should only read part of the file, maybe for that
@@ -140,13 +140,14 @@ impl CommitLog {
         // TODO Offset file should only be updated if the response was
         // sent successfully to the client, we have to make sure the
         // client receives the message to update the offset.
-        self.increment_and_save_offset(partition, &mut offset).await;
+        self.increment_and_save_offset(partition, &group, &mut offset)
+            .await;
         Ok(message.data.clone())
     }
 
-    async fn create_offset_files(&self) -> Result<(), &str> {
+    async fn create_offset_files(&self, group: &String) -> Result<(), &str> {
         for partition in 0..self.partitions {
-            let offset_path = format!("{}/{}/{partition}.offset", self.rog_home, self.name);
+            let offset_path = format!("{}/{}/{partition}.{group}.offset", self.rog_home, self.name);
             if Path::new(&offset_path).exists() {
                 debug!(partition = partition, "Offset file already exists");
                 break;
@@ -169,8 +170,11 @@ impl CommitLog {
         Ok(())
     }
 
-    async fn load_offset(&self, partition: usize) -> usize {
-        let offset_file_name = format!("{}/{}/{}.offset", self.rog_home, self.name, partition);
+    async fn load_offset(&self, partition: usize, group: &String) -> usize {
+        let offset_file_name = format!(
+            "{}/{}/{}.{group}.offset",
+            self.rog_home, self.name, partition
+        );
         let mut offset_file = File::open(&offset_file_name).await.unwrap();
         let mut buf = Vec::new();
         offset_file.read_to_end(&mut buf).await.unwrap();
@@ -190,8 +194,16 @@ impl CommitLog {
         }
     }
 
-    async fn increment_and_save_offset(&self, partition: usize, offset: &mut usize) {
-        let offset_file_name = format!("{}/{}/{}.offset", self.rog_home, self.name, partition);
+    async fn increment_and_save_offset(
+        &self,
+        partition: usize,
+        group: &String,
+        offset: &mut usize,
+    ) {
+        let offset_file_name = format!(
+            "{}/{}/{}.{group}.offset",
+            self.rog_home, self.name, partition
+        );
         *offset += 1;
         let binary_offset = bincode::serialize(&offset).unwrap();
         let mut offset_file = OpenOptions::new()
