@@ -3,6 +3,14 @@ name = "rog"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "rog-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "rog-cli"
+path = "src/bin/cli.rs"
+
 [dependencies]
 tracing = "0.1"
 tracing-subscriber = "0.3"
