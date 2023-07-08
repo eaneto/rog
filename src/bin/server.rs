@@ -112,6 +112,11 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
 }
 
 async fn create_log(logs: Logs, name: String, partitions: usize) -> Vec<u8> {
+    if partitions == 0 {
+        let response = format!("-Number of partitions must be at least 1{CRLF}");
+        return response.as_bytes().to_vec();
+    }
+
     if logs.read().await.contains_key(&name) {
         let response = format!("-Log {name} already exists{CRLF}");
         return response.as_bytes().to_vec();
