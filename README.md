@@ -10,6 +10,24 @@ A simple distributed commit log inspired by [Kafka][0].
 
 To build both the cli and the server you can just run `cargo build --release`.
 
+## Integration tests
+
+The integration tests are written in python. You can install the
+dependencies with pip: `pip install -r tests/requirements.txt`. The
+tests use protobuf for a few scenarios, so you need the protobuf compiler, you can generated the necessary files running this command:
+
+```shell
+protoc -I=tests/proto --python_out=tests tests/proto/addressbook.proto
+```
+
+If you don't want to install protoc you can run the tests with the
+local docker image, this image is used simply to run this tests in an
+isolated environment.
+
+```shell
+docker build -t rog:rog .
+```
+
 ## Rog CLI
 
 To interact with the server you can use the rog cli.

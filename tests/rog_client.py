@@ -50,6 +50,14 @@ class RogClient:
         self.__socket.send(request.encode("utf-8"))
         return self.__socket.recv(1024)
 
+    def send_binary_message(self, log_name: str, partition: int, data: bytes):
+        request = f"1{partition}{CRLF}{log_name}{CRLF}"
+        request = bytearray(request.encode("utf-8"))
+        request.extend(data)
+        request.extend(CRLF.encode("utf-8"))
+        self.__socket.send(request)
+        return self.__socket.recv(1024)
+
     def fetch_log(self, log_name: str, partition: int, group: str):
         request = f"2{partition}{CRLF}{log_name}{CRLF}{group}{CRLF}"
         self.__socket.send(request.encode("utf-8"))
