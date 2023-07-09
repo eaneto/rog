@@ -1,3 +1,5 @@
+from time import sleep
+
 from rog_client import RogClient, CRLF
 
 client = RogClient()
@@ -14,9 +16,11 @@ for i in range(10):
     expected_response = f"+OK{CRLF}"
     assert response.decode("utf-8") == expected_response
 
+    sleep(0.1)
+
     client.connect()
     response = client.fetch_log("events.log", i, "test-group")
-    expected_response = f"some data"
+    expected_response = "some data"
     assert response.decode("utf-8") == expected_response
 
 # Test publishing more than one message to same partition
@@ -29,6 +33,8 @@ client.connect()
 response = client.send_message("events.log", 0, "second message")
 expected_response = f"+OK{CRLF}"
 assert response.decode("utf-8") == expected_response
+
+sleep(0.1)
 
 client.connect()
 response = client.fetch_log("events.log", 0, "test-group")
@@ -55,6 +61,8 @@ client.connect()
 response = client.send_message("other-events.log", 0, "second message")
 expected_response = f"+OK{CRLF}"
 assert response.decode("utf-8") == expected_response
+
+sleep(0.1)
 
 client.connect()
 response = client.fetch_log("other-events.log", 0, "test-group-1")
