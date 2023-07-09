@@ -19,3 +19,5 @@ Cargo.lock
 /target
 
 **/__pycache__/**
+
+tests/*_pb2.py
