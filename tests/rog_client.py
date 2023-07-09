@@ -11,7 +11,7 @@ CRLF = "\r\n"
 
 
 def initialize_rog_server(port: int = 7878, args: Optional[str] = None):
-    command = ["./target/release/rog-server", "-p", str(port)]
+    command = ["rog-server", "-p", str(port)]
     if args is not None:
         command.extend(args.split(" "))
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

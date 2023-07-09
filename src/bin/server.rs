@@ -152,7 +152,6 @@ async fn publish_message(
                     "-Trying to access partition {partition} but log {log_name} has {} partitions{CRLF}",
                     log.partitions
                 );
-                // TODO Change to response.bytes()
                 return response.as_bytes().to_vec();
             }
             match log.send_message(message).await {

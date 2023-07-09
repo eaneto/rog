@@ -22,6 +22,8 @@ for test in test_files:
     try:
         print(f"Executing {test}")
         command = ["python", test]
-        subprocess.run(command)
+        p = subprocess.run(command)
+        if p.returncode != 0:
+            raise Exception("Tests failed")
     finally:
         kill_rog_server(pid)
