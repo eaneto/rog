@@ -1,4 +1,4 @@
-syntax = "proto2";
+syntax = "proto3";
 
 package rog;
 
@@ -16,7 +16,7 @@ message Person {
 
   message PhoneNumber {
     optional string number = 1;
-    optional PhoneType type = 2 [default = PHONE_TYPE_MOBILE];
+    optional PhoneType type = 2;
   }
 
   repeated PhoneNumber phones = 4;
