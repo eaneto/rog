@@ -9,6 +9,7 @@ test_files = glob.glob("tests/*_test.py")
 
 os.environ["ROG_HOME"] = "/tmp/rog"
 
+any_failed = False
 for test in test_files:
     # Reset the rog directory every test so that a log created in one
     # test doesn't affect the other test.
@@ -24,6 +25,9 @@ for test in test_files:
         command = ["python", test]
         p = subprocess.run(command)
         if p.returncode != 0:
-            raise Exception("Tests failed")
+            any_failed = True
     finally:
         kill_rog_server(pid)
+
+if any_failed:
+    raise Exception("At least one of the tests failed")
