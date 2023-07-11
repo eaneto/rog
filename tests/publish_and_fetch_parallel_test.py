@@ -56,7 +56,10 @@ with Pool(cpu_count()) as pool:
             messages_by_partition[partition] = []
             messages_by_partition[partition].append(message)
 
-        pool.apply(publish_proto, (message, partition))
+        pool.apply_async(publish_proto, (message, partition))
+
+    pool.close()
+    pool.join()
 
 sleep(1)
 
