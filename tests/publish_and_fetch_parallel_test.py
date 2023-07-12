@@ -37,6 +37,18 @@ def publish_proto(person_proto: Person, partition: int):
     assert response.decode("utf-8") == expected_response
 
 
+def fetch_all_events_from_partition(messages, partition):
+    for person in messages:
+        client.connect()
+        response = client.fetch_log("proto-events.log", partition, "proto-group")
+        response_person = Person()
+        response_person.ParseFromString(response)
+        assert response_person.id == person.id
+        assert response_person.name == person.name
+        assert response_person.email == person.email
+        assert response_person.phones == person.phones
+
+
 # Test publishing one message to each partition in a log
 client.connect()
 response = client.create_log("proto-events.log", 10)
@@ -46,7 +58,7 @@ assert response.decode("utf-8") == expected_response
 messages_by_partition: Dict[int, List[Person]] = {}
 print(f"Running test with {cpu_count()} processes")
 with Pool(cpu_count()) as pool:
-    for i in range(30):
+    for i in range(100):
         partition = i % 10
         message = build_random_person_object()
 
@@ -64,13 +76,9 @@ with Pool(cpu_count()) as pool:
 sleep(1)
 
 
-for partition, messages in messages_by_partition.items():
-    for person in messages:
-        client.connect()
-        response = client.fetch_log("proto-events.log", partition, "proto-group")
-        response_person = Person()
-        response_person.ParseFromString(response)
-        assert response_person.id == person.id
-        assert response_person.name == person.name
-        assert response_person.email == person.email
-        assert response_person.phones == person.phones
+with Pool(cpu_count()) as pool:
+    for partition, messages in messages_by_partition.items():
+        pool.apply_async(fetch_all_events_from_partition, (messages, partition))
+
+    pool.close()
+    pool.join()
