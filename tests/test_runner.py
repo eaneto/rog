@@ -1,4 +1,5 @@
 import glob
+import sys
 import os
 import subprocess
 import shutil
@@ -8,6 +9,11 @@ from rog_client import initialize_rog_server, kill_rog_server
 test_files = glob.glob("tests/*_test.py")
 
 os.environ["ROG_HOME"] = "/tmp/rog"
+
+try:
+    profile = sys.argv[1]
+except:
+    profile = "local"
 
 any_failed = False
 for test in test_files:
@@ -19,7 +25,7 @@ for test in test_files:
         pass
 
     os.mkdir("/tmp/rog")
-    pid = initialize_rog_server()
+    pid = initialize_rog_server(profile)
     try:
         print(f"Executing {test}")
         command = ["python", test]

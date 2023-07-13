@@ -16,4 +16,4 @@ RUN python3 -m pip install protobuf
 
 RUN protoc -I=tests/proto --python_out=tests tests/proto/addressbook.proto
 
-RUN python3 tests/test_runner.py
+RUN python3 tests/test_runner.py docker

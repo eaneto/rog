@@ -10,8 +10,12 @@ import psutil
 CRLF = "\r\n"
 
 
-def initialize_rog_server(port: int = 7878, args: Optional[str] = None):
-    command = ["rog-server", "-p", str(port)]
+def initialize_rog_server(profile: str, port: int = 7878, args: Optional[str] = None):
+    if profile == "docker":
+        binary = "rog-server"
+    else:
+        binary = "./target/release/rog-server"
+    command = [binary, "-p", str(port)]
     if args is not None:
         command.extend(args.split(" "))
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
