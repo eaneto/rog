@@ -56,8 +56,11 @@ async fn handle_connections(listener: TcpListener, logs: Logs) {
 async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     let mut cursor = 0;
     let mut buf = vec![0u8; 4096];
-    // TODO Fix for packets over 4kb
     loop {
+        if buf.len() == cursor {
+            buf.resize(cursor * 2, 0);
+        }
+
         let bytes_read = match stream.read(&mut buf[cursor..]).await {
             Ok(size) => size,
             Err(_) => break,
@@ -65,10 +68,6 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
 
         if bytes_read == 0 {
             break;
-        }
-
-        if buf.len() == cursor {
-            buf.resize(cursor * 2, 0);
         }
 
         if bytes_read < buf.len() {

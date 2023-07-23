@@ -62,7 +62,7 @@ class RogClient:
         self.__socket.send(request_bytes)
         return self.__socket.recv(1024)
 
-    def fetch_log(self, log_name: str, partition: int, group: str):
+    def fetch_log(self, log_name: str, partition: int, group: str, buffer_size: int = 1024):
         request = f"2{partition}{CRLF}{log_name}{CRLF}{group}{CRLF}"
         self.__socket.send(request.encode("utf-8"))
-        return self.__socket.recv(1024)
+        return self.__socket.recv(buffer_size)
