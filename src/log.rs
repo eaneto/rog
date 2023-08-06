@@ -1,5 +1,7 @@
-use std::os::unix::ffi::OsStrExt;
-use std::{collections::HashMap, env, ffi::OsStr, path::Path, sync::Arc, time::SystemTime};
+use std::{
+    collections::HashMap, env, ffi::OsStr, os::unix::prelude::OsStrExt, path::Path, sync::Arc,
+    time::SystemTime,
+};
 
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
@@ -61,14 +63,22 @@ impl CommitLog {
         }
 
         for partition in 0..self.partitions {
-            match File::create(format!("{}/{}/{partition}.log", self.rog_home, self.name)).await {
+            match fs::create_dir(format!("{}/{}/{partition}", self.rog_home, self.name)).await {
+                Ok(_) => debug!(partition = partition, "Successfully created partition file"),
+                Err(e) => {
+                    error!(partition = partition, "Unable to create partition file {e}");
+                    return Err("Unable to create partition file {partition}");
+                }
+            }
+
+            match File::create(format!("{}/{}/{partition}/0.log", self.rog_home, self.name)).await {
                 Ok(_) => debug!(partition = partition, "Successfully created log file"),
                 Err(e) => {
                     error!(partition = partition, "Unable to create log file {e}");
                     return Err("Unable to create log file for partition {partition}");
                 }
             }
-            match File::create(format!("{}/{}/{partition}.id", self.rog_home, self.name)).await {
+            match File::create(format!("{}/{}/{partition}/id", self.rog_home, self.name)).await {
                 Ok(_) => debug!(
                     partition = partition,
                     "Successfully created partition id file"
@@ -117,12 +127,7 @@ impl CommitLog {
 
         let mut offset: usize = self.load_offset(partition, &group).await;
 
-        // TODO Instead of loading the whole log in memory this
-        // function should only read part of the file, maybe for that
-        // I'll need to write a custom serializer instead of using
-        // Serde, or split the log in multiple smaller files, kind of
-        // how Postgres splits the data in pages of 8kb.
-        let log_file_name = format!("{}/{}/{}.log", self.rog_home, self.name, partition);
+        let log_file_name = self.find_log_file(offset, partition);
         let mut log_file = File::open(log_file_name).await.unwrap();
         let mut buf = Vec::new();
         let _ = log_file.read_to_end(&mut buf).await.unwrap();
@@ -147,7 +152,7 @@ impl CommitLog {
 
     async fn create_offset_files(&self, group: &String) -> Result<(), &str> {
         for partition in 0..self.partitions {
-            let offset_path = format!("{}/{}/{partition}.{group}.offset", self.rog_home, self.name);
+            let offset_path = format!("{}/{}/{partition}/{group}.offset", self.rog_home, self.name);
             if Path::new(&offset_path).exists() {
                 debug!(partition = partition, "Offset file already exists");
                 break;
@@ -170,11 +175,13 @@ impl CommitLog {
         Ok(())
     }
 
+    fn find_log_file(&self, offset: usize, partition: usize) -> String {
+        find_log_file_by_id(&self.rog_home, &self.name, offset, partition)
+    }
+
     async fn load_offset(&self, partition: usize, group: &String) -> usize {
-        let offset_file_name = format!(
-            "{}/{}/{}.{group}.offset",
-            self.rog_home, self.name, partition
-        );
+        let offset_file_name =
+            format!("{}/{}/{partition}/{group}.offset", self.rog_home, self.name);
         let mut offset_file = File::open(&offset_file_name).await.unwrap();
         let mut buf = Vec::new();
         offset_file.read_to_end(&mut buf).await.unwrap();
@@ -200,10 +207,8 @@ impl CommitLog {
         group: &String,
         offset: &mut usize,
     ) {
-        let offset_file_name = format!(
-            "{}/{}/{}.{group}.offset",
-            self.rog_home, self.name, partition
-        );
+        let offset_file_name =
+            format!("{}/{}/{partition}/{group}.offset", self.rog_home, self.name);
         *offset += 1;
         let binary_offset = bincode::serialize(&offset).unwrap();
         let mut offset_file = OpenOptions::new()
@@ -241,10 +246,13 @@ impl CommitLogReceiver {
             let id = self.load_most_recent_id(&ids, partition).await;
             let message = Message::new(id, internal_message);
 
-            let mut log = self.load_log_from_file(partition).await;
+            // TODO Instead of loading the log into memory this
+            // process should only append the new message to the log
+            // file.
+            let (mut log, log_file_name) = self.load_log_from_file(id, partition).await;
             log.insert(message.id, message);
 
-            self.save_log_to_file(log, partition).await;
+            self.save_log_to_file(log, log_file_name).await;
 
             self.save_id_file(id, partition).await;
         }
@@ -271,22 +279,19 @@ impl CommitLogReceiver {
     }
 
     async fn load_id_from_file(&self, partition: usize) -> Result<usize, Box<bincode::ErrorKind>> {
-        let id_file_name = format!("{}/{}/{}.id", self.rog_home, self.name, partition);
+        let id_file_name = format!("{}/{}/{partition}/id", self.rog_home, self.name);
         let mut id_file = File::open(id_file_name).await.unwrap();
         let mut buf = Vec::new();
         let _ = id_file.read_to_end(&mut buf).await.unwrap();
         bincode::deserialize(&buf)
     }
 
-    async fn load_log_from_file(&self, partition: usize) -> HashMap<usize, Message> {
-        let log_file_name = format!("{}/{}/{}.log", self.rog_home, self.name, partition);
-        let result = File::open(&log_file_name).await;
-        let mut log_file = match result {
-            Ok(file) => file,
-            Err(e) => {
-                panic!("Unable to open log file {e}");
-            }
-        };
+    async fn load_log_from_file(
+        &self,
+        id: usize,
+        partition: usize,
+    ) -> (HashMap<usize, Message>, String) {
+        let (mut log_file, log_file_name) = self.find_log_file(id, partition).await;
         let mut buf = Vec::new();
         log_file.read_to_end(&mut buf).await.unwrap();
 
@@ -295,12 +300,40 @@ impl CommitLogReceiver {
         } else {
             bincode::deserialize(&buf).unwrap()
         };
-        log
+        (log, log_file_name)
     }
 
-    async fn save_log_to_file(&self, log: HashMap<usize, Message>, partition: usize) {
+    async fn find_log_file(&self, id: usize, partition: usize) -> (File, String) {
+        let log_file_name = find_log_file_by_id(&self.rog_home, &self.name, id, partition);
+
+        let result = File::open(&log_file_name).await;
+        let log_file = match result {
+            Ok(file) => file,
+            Err(e) => {
+                panic!("Unable to open log file {e}");
+            }
+        };
+
+        // Is current log file full?  This doesn't actually guarantee
+        // that the file will have 8kB, because messages are not split
+        // in different files, so if two 5kB messages arrive and are
+        // written to a new log file the file will have 10kB. But this
+        // condition guarantees that the next 5kB message will be
+        // written in a new log file.
+        if log_file.metadata().await.unwrap().len() >= 8 * 1024 {
+            let log_file_name = format!("{}/{}/{partition}/{id}.log", self.rog_home, self.name);
+            match File::create(&log_file_name).await {
+                Ok(_) => debug!("Created new log file for {id}"),
+                Err(e) => panic!("Unable to create new log file at {log_file_name} {e}"),
+            }
+            (File::open(&log_file_name).await.unwrap(), log_file_name)
+        } else {
+            (log_file, log_file_name)
+        }
+    }
+
+    async fn save_log_to_file(&self, log: HashMap<usize, Message>, log_file_name: String) {
         let encoded_log = bincode::serialize(&log).unwrap();
-        let log_file_name = format!("{}/{}/{}.log", self.rog_home, self.name, partition);
         let result = OpenOptions::new().write(true).open(&log_file_name).await;
         let mut log_file = match result {
             Ok(file) => file,
@@ -313,7 +346,7 @@ impl CommitLogReceiver {
 
     async fn save_id_file(&self, id: usize, partition: usize) {
         let encoded_id = bincode::serialize(&id).unwrap();
-        let id_file_name = format!("{}/{}/{}.id", self.rog_home, self.name, partition);
+        let id_file_name = format!("{}/{}/{partition}/id", self.rog_home, self.name);
         let result = OpenOptions::new().write(true).open(id_file_name).await;
 
         let mut id_file = match result {
@@ -323,6 +356,45 @@ impl CommitLogReceiver {
             }
         };
         id_file.write_all(&encoded_id).await.unwrap();
+    }
+}
+
+fn find_log_file_by_id(rog_home: &String, name: &String, id: usize, partition: usize) -> String {
+    // TODO Keep all entries in memory
+    let mut log_files: Vec<usize> = std::fs::read_dir(format!("{}/{}/{partition}", rog_home, name))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension() == Some(OsStr::from_bytes(b"log")))
+        .map(|file| {
+            file.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+                .strip_suffix(".log")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        })
+        .collect();
+    log_files.sort();
+
+    let mut log_file_matching_id = None;
+    for files in log_files.windows(2) {
+        if id >= files[0] && id < files[1] {
+            log_file_matching_id = Some(files[0]);
+            break;
+        }
+    }
+
+    match log_file_matching_id {
+        Some(file_name) => format!("{}/{}/{partition}/{}.log", rog_home, name, file_name),
+        None => format!(
+            "{}/{}/{partition}/{}.log",
+            rog_home,
+            name,
+            log_files.last().unwrap()
+        ),
     }
 }
 
@@ -379,11 +451,14 @@ pub async fn load_logs(logs: Logs) {
     while let Some(entry) = dir.next_entry().await.unwrap() {
         let file_name = entry.file_name();
         let log_name = file_name.to_string_lossy().to_string();
+        // Counts how many directories are inside the log directory,
+        // each partition has its own directory.
         let partitions = std::fs::read_dir(format!("{rog_home}/{log_name}"))
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension() == Some(OsStr::from_bytes(b"log")))
+            .filter(|entry| entry.path().is_dir())
             .count();
+
         debug!(
             partitions = partitions,
             log_name = log_name,
