@@ -7,7 +7,7 @@ use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::{self, AsyncReadExt, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{
         mpsc::{self, error::SendError, Receiver, Sender},
         Mutex, RwLock,
@@ -128,18 +128,51 @@ impl CommitLog {
         let mut offset: usize = self.load_offset(partition, &group).await;
 
         let log_file_name = self.find_log_file(offset, partition);
-        let mut log_file = File::open(log_file_name).await.unwrap();
-        let mut buf = Vec::new();
-        let _ = log_file.read_to_end(&mut buf).await.unwrap();
 
-        let log: HashMap<usize, Message> = if buf.is_empty() {
-            HashMap::new()
-        } else {
-            bincode::deserialize(&buf).unwrap()
-        };
-        let message = match log.get(&offset) {
-            Some(message) => message,
-            None => return Err("No data left in the log to be read"),
+        let mut log_file = File::open(log_file_name).await.unwrap();
+        // First id starts as the first 8 bytes of the file.
+        let mut id_start = 0;
+        // The id is the first 8 bytes followed by the message size,
+        // also 8 bytes, so the message size ends at the 16th
+        // position.
+        let mut message_size_end = 16;
+        let message: Record = loop {
+            if let Err(e) = log_file.seek(io::SeekFrom::Start(id_start as u64)).await {
+                panic!("Unable to seek file at position {id_start} {e}")
+            }
+            let mut buf = vec![0; 16];
+            if let Err(e) = log_file.read_exact(&mut buf).await {
+                match e.kind() {
+                    io::ErrorKind::UnexpectedEof => {
+                        return Err("No data left in the log to be read");
+                    }
+                    _ => panic!("Unexpected error reading the log file {e}"),
+                }
+            };
+
+            let message_id = &buf[0..8];
+            let message_id = usize::from_be_bytes(message_id.try_into().unwrap());
+            let message_size = &buf[8..16];
+            let message_size = usize::from_be_bytes(message_size.try_into().unwrap());
+            if message_id == offset {
+                if let Err(e) = log_file
+                    .seek(io::SeekFrom::Start(message_size_end as u64))
+                    .await
+                {
+                    panic!("Unable to seek file at position {message_size_end} {e}")
+                }
+                let mut buf = vec![0; message_size];
+                if let Err(e) = log_file.read_exact(&mut buf).await {
+                    panic!("Unable to read log file at byte {message_size_end} {e}");
+                }
+                break match bincode::deserialize(&buf) {
+                    Ok(record) => record,
+                    Err(e) => panic!("Unable to deserialize saved message on log {e}"),
+                };
+            } else {
+                id_start += 16 + message_size;
+                message_size_end += 16 + message_size;
+            }
         };
 
         // TODO Offset file should only be updated if the response was
@@ -244,15 +277,14 @@ impl CommitLogReceiver {
         while let Some(internal_message) = receiver.recv().await {
             let partition = internal_message.partition;
             let id = self.load_most_recent_id(&ids, partition).await;
-            let message = Message::new(id, internal_message);
 
-            // TODO Instead of loading the log into memory this
-            // process should only append the new message to the log
-            // file.
-            let (mut log, log_file_name) = self.load_log_from_file(id, partition).await;
-            log.insert(message.id, message);
+            let log_file_name = self.find_log_file(id, partition).await;
 
-            self.save_log_to_file(log, log_file_name).await;
+            let record = Record::new(internal_message);
+            let record_in_storage_format = self.build_record_in_storage_format(&record, id);
+
+            self.save_log_to_file(log_file_name, record_in_storage_format)
+                .await;
 
             self.save_id_file(id, partition).await;
         }
@@ -286,24 +318,28 @@ impl CommitLogReceiver {
         bincode::deserialize(&buf)
     }
 
-    async fn load_log_from_file(
-        &self,
-        id: usize,
-        partition: usize,
-    ) -> (HashMap<usize, Message>, String) {
-        let (mut log_file, log_file_name) = self.find_log_file(id, partition).await;
-        let mut buf = Vec::new();
-        log_file.read_to_end(&mut buf).await.unwrap();
-
-        let log: HashMap<usize, Message> = if buf.is_empty() {
-            HashMap::new()
-        } else {
-            bincode::deserialize(&buf).unwrap()
+    /// Build the message in the format used in storage.
+    ///
+    /// The first 8 bytes are the message id, stored in the big endian
+    /// format. The following 8 bytes are the message size also stored
+    /// as a big endian. The other bytes are the actual content of the
+    /// message received stored as a [Record], with the data and the
+    /// producer timestamp.
+    fn build_record_in_storage_format(&self, record: &Record, id: usize) -> Vec<u8> {
+        let record = match bincode::serialize(record) {
+            Ok(message) => message,
+            Err(e) => panic!("Unable to serialize record to binary {e}"),
         };
-        (log, log_file_name)
+        let record_size = record.len().to_be_bytes();
+        let binary_id = id.to_be_bytes();
+        let mut storable_record = Vec::new();
+        storable_record.extend(binary_id);
+        storable_record.extend(record_size);
+        storable_record.extend(record);
+        storable_record
     }
 
-    async fn find_log_file(&self, id: usize, partition: usize) -> (File, String) {
+    async fn find_log_file(&self, id: usize, partition: usize) -> String {
         let log_file_name = find_log_file_by_id(&self.rog_home, &self.name, id, partition);
 
         let result = File::open(&log_file_name).await;
@@ -326,22 +362,23 @@ impl CommitLogReceiver {
                 Ok(_) => debug!("Created new log file for {id}"),
                 Err(e) => panic!("Unable to create new log file at {log_file_name} {e}"),
             }
-            (File::open(&log_file_name).await.unwrap(), log_file_name)
+            log_file_name
         } else {
-            (log_file, log_file_name)
+            log_file_name
         }
     }
 
-    async fn save_log_to_file(&self, log: HashMap<usize, Message>, log_file_name: String) {
-        let encoded_log = bincode::serialize(&log).unwrap();
-        let result = OpenOptions::new().write(true).open(&log_file_name).await;
+    async fn save_log_to_file(&self, log_file_name: String, parsed_message: Vec<u8>) {
+        let result = OpenOptions::new().append(true).open(&log_file_name).await;
         let mut log_file = match result {
             Ok(file) => file,
             Err(e) => {
-                panic!("Unable to open log file {e}");
+                panic!("Unable to open log file for appending {log_file_name} {e}");
             }
         };
-        log_file.write_all(&encoded_log).await.unwrap();
+        if let Err(e) = log_file.write_all(&parsed_message).await {
+            panic!("Unable to write to log file {log_file_name} {e}");
+        }
     }
 
     async fn save_id_file(&self, id: usize, partition: usize) {
@@ -416,16 +453,14 @@ impl InternalMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Message {
-    id: usize,
+pub struct Record {
     data: BytesMut,
     timestamp: SystemTime,
 }
 
-impl Message {
-    pub fn new(id: usize, internal_message: InternalMessage) -> Message {
-        Message {
-            id,
+impl Record {
+    pub fn new(internal_message: InternalMessage) -> Record {
+        Record {
             data: internal_message.data,
             timestamp: internal_message.timestamp,
         }

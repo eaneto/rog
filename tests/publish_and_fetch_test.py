@@ -64,3 +64,9 @@ fetch_and_verify("other-events.log", 0, "test-group-2", expected_response)
 
 expected_response = f"second message"
 fetch_and_verify("other-events.log", 0, "test-group-2", expected_response)
+
+# Fetch data from a log with no data left
+client.connect()
+response = client.fetch_log("other-events.log", 0, "test-group-2")
+expected_response = "No data left in the log to be read"
+assert response.decode("utf-8") == expected_response
