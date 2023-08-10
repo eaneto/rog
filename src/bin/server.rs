@@ -110,7 +110,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     send_response(&mut stream, response).await;
 }
 
-async fn create_log(logs: Logs, name: String, partitions: usize) -> Vec<u8> {
+async fn create_log(logs: Logs, name: String, partitions: u8) -> Vec<u8> {
     if partitions == 0 {
         let response = format!("-Number of partitions must be at least 1{CRLF}");
         return response.as_bytes().to_vec();
@@ -137,12 +137,7 @@ async fn create_log(logs: Logs, name: String, partitions: usize) -> Vec<u8> {
     }
 }
 
-async fn publish_message(
-    logs: Logs,
-    log_name: String,
-    partition: usize,
-    data: BytesMut,
-) -> Vec<u8> {
+async fn publish_message(logs: Logs, log_name: String, partition: u8, data: BytesMut) -> Vec<u8> {
     match logs.read().await.get(&log_name) {
         Some(log) => {
             let message = InternalMessage::new(partition, data);
@@ -176,13 +171,13 @@ async fn publish_message(
             }
         }
         None => {
-            let response = format!("-No log registered with name {log_name}{CRLF}");
+            let response = format!("-No log registered with name '{log_name}'{CRLF}");
             response.as_bytes().to_vec()
         }
     }
 }
 
-async fn fetch_log(logs: Logs, log_name: String, partition: usize, group: String) -> Vec<u8> {
+async fn fetch_log(logs: Logs, log_name: String, partition: u8, group: String) -> Vec<u8> {
     match logs.read().await.get(&log_name) {
         Some(log) => {
             let data = match log.fetch_message(partition, group).await {
@@ -196,7 +191,7 @@ async fn fetch_log(logs: Logs, log_name: String, partition: usize, group: String
             data.to_vec()
         }
         None => {
-            let response = format!("-No log registered with name {log_name}{CRLF}");
+            let response = format!("-No log registered with name '{log_name}'{CRLF}");
             response.as_bytes().to_vec()
         }
     }
