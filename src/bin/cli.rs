@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use rog::command::{read_until_delimiter, CRLF};
+use rog::command::CRLF;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -15,7 +15,7 @@ enum Command {
 
         /// Number of partitions for the log
         #[clap(long, short)]
-        partitions: usize,
+        partitions: u8,
     },
     Publish {
         /// Log name
@@ -24,7 +24,7 @@ enum Command {
 
         /// Partition to publish the data
         #[clap(long, short)]
-        partition: usize,
+        partition: u8,
 
         /// Data to be published
         #[clap(long, short)]
@@ -37,7 +37,7 @@ enum Command {
 
         /// Partition to publish the data
         #[clap(long, short)]
-        partition: usize,
+        partition: u8,
 
         /// Consumer group
         #[clap(long, short)]
@@ -63,9 +63,17 @@ fn main() {
     };
     match args.command {
         Command::CreateLog { name, partitions } => {
-            let command = format!("0{partitions}{CRLF}{name}{CRLF}");
-            let command = command.as_bytes();
-            if let Err(e) = stream.write_all(command) {
+            let command_byte = (0_u8).to_be_bytes();
+            let partitions_as_bytes = partitions.to_be_bytes();
+            let name_as_bytes = name.as_bytes();
+
+            let mut command = Vec::new();
+            command.extend(command_byte);
+            command.extend(partitions_as_bytes);
+            command.extend((name_as_bytes.len() as u8).to_be_bytes());
+            command.extend(name_as_bytes);
+
+            if let Err(e) = stream.write_all(&command) {
                 println!("Unable to create log\n{e}");
                 return;
             }
@@ -90,9 +98,20 @@ fn main() {
             partition,
             data,
         } => {
-            let command = format!("1{partition}{CRLF}{log_name}{CRLF}{data}{CRLF}");
-            let command = command.as_bytes();
-            if let Err(e) = stream.write_all(command) {
+            let command_byte = (1_u8).to_be_bytes();
+            let partitions_as_bytes = partition.to_be_bytes();
+            let name_as_bytes = log_name.as_bytes();
+            let data_as_bytes = data.as_bytes();
+
+            let mut command = Vec::new();
+            command.extend(command_byte);
+            command.extend(partitions_as_bytes);
+            command.extend((name_as_bytes.len() as u8).to_be_bytes());
+            command.extend(name_as_bytes);
+            command.extend(data_as_bytes.len().to_be_bytes());
+            command.extend(data_as_bytes);
+
+            if let Err(e) = stream.write_all(&command) {
                 println!("Unable to publish to log\n{e}");
                 return;
             }
@@ -119,9 +138,20 @@ fn main() {
             partition,
             group,
         } => {
-            let command = format!("2{partition}{CRLF}{log_name}{CRLF}{group}{CRLF}");
-            let command = command.as_bytes();
-            if let Err(e) = stream.write_all(command) {
+            let command_byte = (2_u8).to_be_bytes();
+            let partitions_as_bytes = partition.to_be_bytes();
+            let name_as_bytes = log_name.as_bytes();
+            let group_as_bytes = group.as_bytes();
+
+            let mut command = Vec::new();
+            command.extend(command_byte);
+            command.extend(partitions_as_bytes);
+            command.extend((name_as_bytes.len() as u8).to_be_bytes());
+            command.extend(name_as_bytes);
+            command.extend((group_as_bytes.len() as u8).to_be_bytes());
+            command.extend(group_as_bytes);
+
+            if let Err(e) = stream.write_all(&command) {
                 println!("Unable to fetch log\n{e}");
                 return;
             }
@@ -148,4 +178,19 @@ fn parse_error(buf: &[u8]) -> String {
         }
     };
     String::from_utf8_lossy(&buf[start..index]).to_string()
+}
+
+pub fn read_until_delimiter(buf: &[u8], start: usize, end: usize) -> Result<usize, i64> {
+    let delimiter = CRLF.as_bytes();
+    for i in start..end {
+        match buf.get(i..(i + delimiter.len())) {
+            Some(slice) => {
+                if slice == delimiter {
+                    return Ok(i);
+                }
+            }
+            None => return Err(i as i64),
+        }
+    }
+    Err(-1)
 }

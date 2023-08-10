@@ -18,7 +18,7 @@ use tracing::{debug, error, trace};
 #[derive(Debug)]
 pub struct CommitLog {
     pub name: String,
-    pub partitions: usize,
+    pub partitions: u8,
     senders: Vec<Sender<InternalMessage>>,
     rog_home: String,
 }
@@ -26,7 +26,7 @@ pub struct CommitLog {
 impl CommitLog {
     pub fn new(
         name: String,
-        number_of_partitions: usize,
+        number_of_partitions: u8,
     ) -> (CommitLog, Vec<Receiver<InternalMessage>>) {
         let mut senders = Vec::new();
         let mut receivers = Vec::new();
@@ -100,7 +100,7 @@ impl CommitLog {
         &self,
         message: InternalMessage,
     ) -> Result<(), SendError<InternalMessage>> {
-        self.senders[message.partition].send(message).await
+        self.senders[message.partition as usize].send(message).await
     }
 
     /// Initialize a list a receivers to run in background tasks.
@@ -122,7 +122,7 @@ impl CommitLog {
         }
     }
 
-    pub async fn fetch_message(&self, partition: usize, group: String) -> Result<BytesMut, &str> {
+    pub async fn fetch_message(&self, partition: u8, group: String) -> Result<BytesMut, &str> {
         self.create_offset_files(&group).await?;
 
         let mut offset: usize = self.load_offset(partition, &group).await;
@@ -208,11 +208,11 @@ impl CommitLog {
         Ok(())
     }
 
-    fn find_log_file(&self, offset: usize, partition: usize) -> String {
+    fn find_log_file(&self, offset: usize, partition: u8) -> String {
         find_log_file_by_id(&self.rog_home, &self.name, offset, partition)
     }
 
-    async fn load_offset(&self, partition: usize, group: &String) -> usize {
+    async fn load_offset(&self, partition: u8, group: &String) -> usize {
         let offset_file_name =
             format!("{}/{}/{partition}/{group}.offset", self.rog_home, self.name);
         let mut offset_file = File::open(&offset_file_name).await.unwrap();
@@ -234,12 +234,7 @@ impl CommitLog {
         }
     }
 
-    async fn increment_and_save_offset(
-        &self,
-        partition: usize,
-        group: &String,
-        offset: &mut usize,
-    ) {
+    async fn increment_and_save_offset(&self, partition: u8, group: &String, offset: &mut usize) {
         let offset_file_name =
             format!("{}/{}/{partition}/{group}.offset", self.rog_home, self.name);
         *offset += 1;
@@ -290,8 +285,8 @@ impl CommitLogReceiver {
         }
     }
 
-    async fn load_most_recent_id(&self, ids: &Arc<Vec<Mutex<usize>>>, partition: usize) -> usize {
-        let mut id = ids[partition].lock().await;
+    async fn load_most_recent_id(&self, ids: &Arc<Vec<Mutex<usize>>>, partition: u8) -> usize {
+        let mut id = ids[partition as usize].lock().await;
         // Checks if the current id has been loaded from
         // the file or if it's the first message received.
         if *id == 0 {
@@ -310,7 +305,7 @@ impl CommitLogReceiver {
         *id
     }
 
-    async fn load_id_from_file(&self, partition: usize) -> Result<usize, Box<bincode::ErrorKind>> {
+    async fn load_id_from_file(&self, partition: u8) -> Result<usize, Box<bincode::ErrorKind>> {
         let id_file_name = format!("{}/{}/{partition}/id", self.rog_home, self.name);
         let mut id_file = File::open(id_file_name).await.unwrap();
         let mut buf = Vec::new();
@@ -339,7 +334,7 @@ impl CommitLogReceiver {
         storable_record
     }
 
-    async fn find_log_file(&self, id: usize, partition: usize) -> String {
+    async fn find_log_file(&self, id: usize, partition: u8) -> String {
         let log_file_name = find_log_file_by_id(&self.rog_home, &self.name, id, partition);
 
         let result = File::open(&log_file_name).await;
@@ -381,7 +376,7 @@ impl CommitLogReceiver {
         }
     }
 
-    async fn save_id_file(&self, id: usize, partition: usize) {
+    async fn save_id_file(&self, id: usize, partition: u8) {
         let encoded_id = bincode::serialize(&id).unwrap();
         let id_file_name = format!("{}/{}/{partition}/id", self.rog_home, self.name);
         let result = OpenOptions::new().write(true).open(id_file_name).await;
@@ -396,7 +391,7 @@ impl CommitLogReceiver {
     }
 }
 
-fn find_log_file_by_id(rog_home: &String, name: &String, id: usize, partition: usize) -> String {
+fn find_log_file_by_id(rog_home: &String, name: &String, id: usize, partition: u8) -> String {
     // TODO Keep all entries in memory
     let mut log_files: Vec<usize> = std::fs::read_dir(format!("{}/{}/{partition}", rog_home, name))
         .unwrap()
@@ -437,13 +432,13 @@ fn find_log_file_by_id(rog_home: &String, name: &String, id: usize, partition: u
 
 #[derive(Debug)]
 pub struct InternalMessage {
-    partition: usize,
+    partition: u8,
     data: BytesMut,
     timestamp: SystemTime,
 }
 
 impl InternalMessage {
-    pub fn new(partition: usize, data: BytesMut) -> InternalMessage {
+    pub fn new(partition: u8, data: BytesMut) -> InternalMessage {
         InternalMessage {
             partition,
             data,
@@ -492,7 +487,7 @@ pub async fn load_logs(logs: Logs) {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
-            .count();
+            .count() as u8;
 
         debug!(
             partitions = partitions,
@@ -518,8 +513,8 @@ mod tests {
         set_var("ROG_HOME", "~/.rog");
         let (commit_log, receivers) = CommitLog::new(log_name.clone(), partitions);
 
-        assert_eq!(receivers.len(), partitions);
-        assert_eq!(commit_log.senders.len(), partitions);
+        assert_eq!(receivers.len() as u8, partitions);
+        assert_eq!(commit_log.senders.len() as u8, partitions);
         assert_eq!(commit_log.name, log_name);
         assert_eq!(commit_log.partitions, partitions);
     }

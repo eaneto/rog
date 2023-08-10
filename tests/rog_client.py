@@ -45,24 +45,68 @@ class RogClient:
         self.__socket.connect((self.IP, port))
 
     def create_log(self, log_name: str, partitions: int):
-        request = f"0{partitions}{CRLF}{log_name}{CRLF}"
-        self.__socket.send(request.encode("utf-8"))
+        command_byte = (0).to_bytes(1, byteorder="big")
+        partitions_bytes = partitions.to_bytes(1, byteorder="big")
+        log_name_size = len(log_name).to_bytes(1, byteorder="big")
+        log_name_bytes = log_name.encode("utf-8")
+
+        request = bytearray()
+        request.extend(command_byte)
+        request.extend(partitions_bytes)
+        request.extend(log_name_size)
+        request.extend(log_name_bytes)
+        self.__socket.send(request)
         return self.__socket.recv(1024)
 
-    def send_message(self, log_name: str, partition: int, data):
-        request = f"1{partition}{CRLF}{log_name}{CRLF}{data}{CRLF}"
-        self.__socket.send(request.encode("utf-8"))
+    def send_message(self, log_name: str, partition: int, data: str):
+        command_byte = (1).to_bytes(1, byteorder="big")
+        partition_bytes = partition.to_bytes(1, byteorder="big")
+        log_name_size = len(log_name).to_bytes(1, byteorder="big")
+        log_name_bytes = log_name.encode("utf-8")
+        data_size = len(data).to_bytes(8, byteorder="big")
+        data_bytes = data.encode("utf-8")
+
+        request = bytearray()
+        request.extend(command_byte)
+        request.extend(partition_bytes)
+        request.extend(log_name_size)
+        request.extend(log_name_bytes)
+        request.extend(data_size)
+        request.extend(data_bytes)
+        self.__socket.send(request)
         return self.__socket.recv(1024)
 
     def send_binary_message(self, log_name: str, partition: int, data: bytes):
-        request = f"1{partition}{CRLF}{log_name}{CRLF}"
-        request_bytes = bytearray(request.encode("utf-8"))
-        request_bytes.extend(data)
-        request_bytes.extend(CRLF.encode("utf-8"))
-        self.__socket.send(request_bytes)
+        command_byte = (1).to_bytes(1, byteorder="big")
+        partition_bytes = partition.to_bytes(1, byteorder="big")
+        log_name_size = len(log_name).to_bytes(1, byteorder="big")
+        log_name_bytes = log_name.encode("utf-8")
+        data_size = len(data).to_bytes(8, byteorder="big")
+
+        request = bytearray()
+        request.extend(command_byte)
+        request.extend(partition_bytes)
+        request.extend(log_name_size)
+        request.extend(log_name_bytes)
+        request.extend(data_size)
+        request.extend(data)
+        self.__socket.send(request)
         return self.__socket.recv(1024)
 
     def fetch_log(self, log_name: str, partition: int, group: str, buffer_size: int = 1024):
-        request = f"2{partition}{CRLF}{log_name}{CRLF}{group}{CRLF}"
-        self.__socket.send(request.encode("utf-8"))
+        command_byte = (2).to_bytes(1, byteorder="big")
+        partition_bytes = partition.to_bytes(1, byteorder="big")
+        log_name_size = len(log_name).to_bytes(1, byteorder="big")
+        log_name_bytes = log_name.encode("utf-8")
+        group_size = len(group).to_bytes(1, byteorder="big")
+        group_bytes = group.encode("utf-8")
+
+        request = bytearray()
+        request.extend(command_byte)
+        request.extend(partition_bytes)
+        request.extend(log_name_size)
+        request.extend(log_name_bytes)
+        request.extend(group_size)
+        request.extend(group_bytes)
+        self.__socket.send(request)
         return self.__socket.recv(buffer_size)

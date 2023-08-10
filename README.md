@@ -50,6 +50,46 @@ Options:
 
 ## Protocol specification
 
-TODO
+In all commands the first byte is the command byte, this is used to
+identify which command is being sent. There are two client
+implementations in this repository: one in rust, [for the
+cli](./src/bin/cli.rs) and one in python used in the [integration
+tests](./tests/rog_client.py).
+
+### Commands
+
+#### Create log
+
+| Field         | type   | Description                               |
+|---------------|--------|-------------------------------------------|
+| Command byte  | u8     | Fixed value for the create log command, 0 |
+| partitions    | u8     | Number of partitions for the log          |
+| Log name size | u8     | Size of the log name in bytes             |
+| Log name      | String | Log name                                  |
+
+#### Publish
+
+| Field         | type   | Description                            |
+|---------------|--------|----------------------------------------|
+| Command byte  | u8     | Fixed value for the publish command, 1 |
+| partition     | u8     | Partitions to publish the message      |
+| Log name size | u8     | Size of the log name in bytes          |
+| Log name      | String | Log name                               |
+| Data size     | u64    | Size of the message in bytes           |
+| Data          | bytes  | The actual content of the message      |
+
+#### Fetch
+
+| Field         | type   | Description                                 |
+|---------------|--------|---------------------------------------------|
+| Command byte  | u8     | Fixed value for the fetch command, 2        |
+| partition     | u8     | Partition to fetch the message              |
+| Log name size | u8     | Size of the log name in bytes               |
+| Log name      | String | Log name                                    |
+| Data size     | u64    | Size of the content of the message in bytes |
+| Data          | bytes  | The actual content of the message           |
+
+
+TODO: Document responses
 
 [0]: https://kafka.apache.org/

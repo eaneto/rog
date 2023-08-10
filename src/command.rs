@@ -1,28 +1,25 @@
-use atoi::atoi;
-
 use bytes::{BufMut, BytesMut};
-use tracing::error;
 
 pub const CRLF: &str = "\r\n";
 
-const CREATE_LOG_COMMAND_BYTE: u8 = 48;
-const PUBLISH_COMMAND_BYTE: u8 = 49;
-const FETCH_COMMAND_BYTE: u8 = 50;
+const CREATE_LOG_COMMAND_BYTE: u8 = 0;
+const PUBLISH_COMMAND_BYTE: u8 = 1;
+const FETCH_COMMAND_BYTE: u8 = 2;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
     Create {
         name: String,
-        partitions: usize,
+        partitions: u8,
     },
     Publish {
+        partition: u8,
         log_name: String,
-        partition: usize,
         data: BytesMut,
     },
     Fetch {
+        partition: u8,
         log_name: String,
-        partition: usize,
         group: String,
     },
     Unknown,
@@ -38,35 +35,10 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, String> {
 }
 
 fn parse_create_log_command(buf: &[u8]) -> Result<Command, String> {
-    let start = 1;
-    let end = buf.len() - 1;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
+    let partitions = buf[1];
+    let name_size = buf[2];
 
-    let partitions = &buf[start..index];
-    let partitions = match atoi::<usize>(partitions) {
-        Some(partitions) => partitions,
-        None => {
-            error!("Invalid partition value, unable to parse to unsigned integer");
-            return Err("Invalid partition value, unable to parse to unsigned integer".to_string());
-        }
-    };
-
-    let start = index + 2;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
-
-    let name = &buf[start..index];
+    let name = &buf[3..(3 + name_size as usize)];
     let name = String::from_utf8_lossy(name);
 
     Ok(Command::Create {
@@ -76,47 +48,16 @@ fn parse_create_log_command(buf: &[u8]) -> Result<Command, String> {
 }
 
 fn parse_publish_log_command(buf: &[u8]) -> Result<Command, String> {
-    let start = 1;
-    let end = buf.len() - 1;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
+    let partition = buf[1];
+    let name_size = buf[2];
 
-    let partition = &buf[start..index];
-    let partition = match atoi::<usize>(partition) {
-        Some(partitions) => partitions,
-        None => {
-            error!("Invalid partition value, unable to parse to unsigned integer");
-            return Err("Invalid partition value, unable to parse to unsigned integer".to_string());
-        }
-    };
-
-    let start = index + 2;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
-    let log_name = &buf[start..index];
+    let log_name = &buf[3..(3 + name_size as usize)];
     let log_name = String::from_utf8_lossy(log_name);
 
-    let start = index + 2;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
-
-    let mut data = BytesMut::with_capacity(index - start);
-    data.put(&buf[start..index]);
+    let data_size = &buf[(3 + name_size as usize)..(3 + name_size as usize + 8)];
+    let data_size = usize::from_be_bytes(data_size.try_into().unwrap());
+    let mut data = BytesMut::with_capacity(data_size);
+    data.put(&buf[(3 + 8 + name_size as usize)..(3 + 8 + name_size as usize + data_size)]);
 
     Ok(Command::Publish {
         log_name: log_name.to_string(),
@@ -126,45 +67,14 @@ fn parse_publish_log_command(buf: &[u8]) -> Result<Command, String> {
 }
 
 fn parse_fetch_log_command(buf: &[u8]) -> Result<Command, String> {
-    let start = 1;
-    let end = buf.len() - 1;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
+    let partition = buf[1];
+    let name_size = buf[2];
 
-    let partition = &buf[start..index];
-    let partition = match atoi::<usize>(partition) {
-        Some(partitions) => partitions,
-        None => {
-            error!("Invalid partition value, unable to parse to unsigned integer");
-            return Err("Invalid partition value, unable to parse to unsigned integer".to_string());
-        }
-    };
-
-    let start = index + 2;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
-    let log_name = &buf[start..index];
+    let log_name = &buf[3..(3 + name_size as usize)];
     let log_name = String::from_utf8_lossy(log_name);
 
-    let start = index + 2;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            error!(index = index, "Unparseable command");
-            return Err("Unparseable command at index".to_string());
-        }
-    };
-    let group = &buf[start..index];
+    let group_size = buf[3 + name_size as usize];
+    let group = &buf[(4 + name_size as usize)..(4 + name_size as usize + group_size as usize)];
     let group = String::from_utf8_lossy(group);
 
     Ok(Command::Fetch {
@@ -174,29 +84,21 @@ fn parse_fetch_log_command(buf: &[u8]) -> Result<Command, String> {
     })
 }
 
-pub fn read_until_delimiter(buf: &[u8], start: usize, end: usize) -> Result<usize, i64> {
-    let delimiter = CRLF.as_bytes();
-    for i in start..end {
-        match buf.get(i..(i + delimiter.len())) {
-            Some(slice) => {
-                if slice == delimiter {
-                    return Ok(i);
-                }
-            }
-            None => return Err(i as i64),
-        }
-    }
-    Err(-1)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::command::*;
 
     #[test]
     fn parse_create_log_command() {
-        let buf = "010\r\nsome.log\r\n".as_bytes();
-        let command = parse_command(buf);
+        let command_byte = 0_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "some.log";
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+        let command = parse_command(&buf);
 
         assert!(command.is_ok());
         assert_eq!(
@@ -209,43 +111,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_create_log_command_with_negative_partition_number() {
-        let buf = "0-1\r\nsome.log\r\n".as_bytes();
-        let command = parse_command(buf);
-
-        assert!(command.is_err());
-    }
-
-    #[test]
-    fn parse_create_log_command_with_invalid_partition_number() {
-        let buf = "0aa\r\nsome.log\r\n".as_bytes();
-        let command = parse_command(buf);
-
-        assert!(command.is_err());
-    }
-
-    #[test]
-    fn parse_create_log_command_without_log_name() {
-        let buf = "010\r\n".as_bytes();
-        let command = parse_command(buf);
-
-        assert!(command.is_err());
-    }
-
-    #[test]
-    fn parse_create_log_command_without_crlf_after_log_name() {
-        let buf = "010\r\nsome.log".as_bytes();
-        let command = parse_command(buf);
-
-        assert!(command.is_err());
-    }
-
-    #[test]
     fn parse_publish_command() {
+        let command_byte = 1_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
         let content = String::from("event-content");
-        let buf = format!("110\r\nevents.log\r\n{content}\r\n");
-        let buf = buf.as_bytes();
-        let command = parse_command(buf);
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+        buf.extend(content.as_bytes().len().to_be_bytes());
+        buf.extend(content.as_bytes());
+
+        let command = parse_command(&buf);
 
         let mut data = BytesMut::with_capacity(content.len());
         data.put(content.as_bytes());
@@ -263,8 +142,19 @@ mod tests {
 
     #[test]
     fn parse_fetch_command() {
-        let buf = "210\r\nevents.log\r\ngroup-name\r\n".as_bytes();
-        let command = parse_command(buf);
+        let command_byte = 2_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let group_name = String::from("group-name");
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+        buf.extend((group_name.as_bytes().len() as u8).to_be_bytes());
+        buf.extend(group_name.as_bytes());
+
+        let command = parse_command(&buf);
 
         assert!(command.is_ok());
         assert_eq!(
@@ -278,17 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_fetch_command_without_group() {
-        let buf = "210\r\nevents.log\r\n".as_bytes();
-        let command = parse_command(buf);
-
-        assert!(command.is_err());
-    }
-
-    #[test]
     fn parse_unknown_command() {
-        let buf = "3example".as_bytes();
-        let command = parse_command(buf);
+        let command_byte = 3_u8.to_be_bytes();
+        let command = parse_command(&command_byte);
 
         assert!(command.is_ok());
         assert_eq!(command.unwrap(), Command::Unknown)
