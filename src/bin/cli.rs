@@ -4,7 +4,6 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use rog::command::CRLF;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -81,8 +80,7 @@ fn main() {
             let mut buf = [0; 1024];
             match stream.read(&mut buf) {
                 Ok(_) => {
-                    let ok = format!("+OK{CRLF}");
-                    if &buf[..5] == ok.as_bytes() {
+                    if buf[0] == 0 {
                         println!("Created log {name} with {partitions} partitions");
                     } else {
                         println!("Unable to create log");
@@ -119,13 +117,12 @@ fn main() {
             let mut buf = [0; 1024];
             match stream.read(&mut buf) {
                 Ok(_) => {
-                    let ok = format!("+OK{CRLF}");
-                    if &buf[0..5] == ok.as_bytes() {
+                    if buf[0] == 0 {
                         println!(
                             "Successfully published to log {log_name} to partition {partition}"
                         );
                     } else {
-                        println!("Unable to publish to log",);
+                        println!("Unable to publish to log");
                         let error_message = parse_error(&buf);
                         println!("{error_message}");
                     }
@@ -159,8 +156,15 @@ fn main() {
             let mut buf = [0; 1024];
             match stream.read(&mut buf) {
                 Ok(_) => {
-                    let response = String::from_utf8_lossy(&buf);
-                    println!("{response}");
+                    if buf[0] == 0 {
+                        let message_size = usize::from_be_bytes(buf[1..9].try_into().unwrap());
+                        let response = String::from_utf8_lossy(&buf[9..(9 + message_size)]);
+                        println!("{response}");
+                    } else {
+                        println!("Unable to fetch log");
+                        let error_message = parse_error(&buf);
+                        println!("{error_message}");
+                    }
                 }
                 Err(e) => println!("Unable to fetch log\n{e}"),
             }
@@ -169,28 +173,7 @@ fn main() {
 }
 
 fn parse_error(buf: &[u8]) -> String {
-    let start = 1;
-    let end = buf.len() - 1;
-    let index = match read_until_delimiter(buf, start, end) {
-        Ok(index) => index,
-        Err(index) => {
-            panic!("Unparseable command at index {index}");
-        }
-    };
-    String::from_utf8_lossy(&buf[start..index]).to_string()
-}
-
-pub fn read_until_delimiter(buf: &[u8], start: usize, end: usize) -> Result<usize, i64> {
-    let delimiter = CRLF.as_bytes();
-    for i in start..end {
-        match buf.get(i..(i + delimiter.len())) {
-            Some(slice) => {
-                if slice == delimiter {
-                    return Ok(i);
-                }
-            }
-            None => return Err(i as i64),
-        }
-    }
-    Err(-1)
+    let message_size = usize::from_be_bytes(buf[1..9].try_into().unwrap());
+    let message = &buf[9..(9 + message_size)];
+    String::from_utf8_lossy(message).to_string()
 }

@@ -6,7 +6,7 @@ from multiprocessing import Pool, cpu_count
 from time import sleep
 from random import randint, choices
 
-from rog_client import RogClient, CRLF
+from rog_client import RogClient
 
 client = RogClient()
 
@@ -33,16 +33,20 @@ def publish_proto(person_proto: Person, partition: int):
     data = person_proto.SerializeToString()
     client.connect()
     response = client.send_binary_message("proto-events.log", partition, data)
-    expected_response = f"+OK{CRLF}"
-    assert response.decode("utf-8") == expected_response
+    expected_response = (0).to_bytes(1, byteorder="big")
+    assert response == expected_response
 
 
 def fetch_all_events_from_partition(messages, partition):
     for person in messages:
         client.connect()
         response = client.fetch_log("proto-events.log", partition, "proto-group")
+        success_byte = (0).to_bytes(1, byteorder="big")
+        assert response[0:1] == success_byte
+        message_size = int.from_bytes(response[1:9], "big")
+
         response_person = Person()
-        response_person.ParseFromString(response)
+        response_person.ParseFromString(response[9:(10+message_size)])
         assert response_person.id == person.id
         assert response_person.name == person.name
         assert response_person.email == person.email
@@ -52,8 +56,8 @@ def fetch_all_events_from_partition(messages, partition):
 # Test publishing one message to each partition in a log
 client.connect()
 response = client.create_log("proto-events.log", 10)
-expected_response = f"+OK{CRLF}"
-assert response.decode("utf-8") == expected_response
+expected_response = (0).to_bytes(1, byteorder="big")
+assert response == expected_response
 
 messages_by_partition: Dict[int, List[Person]] = {}
 print(f"Running test with {cpu_count()} processes")
