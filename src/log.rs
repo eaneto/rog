@@ -67,7 +67,7 @@ impl CommitLog {
                 Ok(_) => debug!(partition = partition, "Successfully created partition file"),
                 Err(e) => {
                     error!(partition = partition, "Unable to create partition file {e}");
-                    return Err("Unable to create partition file {partition}");
+                    return Err("Unable to create partition file");
                 }
             }
 
@@ -75,7 +75,7 @@ impl CommitLog {
                 Ok(_) => debug!(partition = partition, "Successfully created log file"),
                 Err(e) => {
                     error!(partition = partition, "Unable to create log file {e}");
-                    return Err("Unable to create log file for partition {partition}");
+                    return Err("Unable to create log file for partition");
                 }
             }
             match File::create(format!("{}/{}/{partition}/id", self.rog_home, self.name)).await {
@@ -88,7 +88,7 @@ impl CommitLog {
                         partition = partition,
                         "Unable to create partition id file {e}"
                     );
-                    return Err("Unable to create log file for partition {partition}");
+                    return Err("Unable to create log file for partition");
                 }
             }
         }

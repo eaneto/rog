@@ -1,7 +1,5 @@
 use bytes::{BufMut, BytesMut};
 
-pub const CRLF: &str = "\r\n";
-
 const CREATE_LOG_COMMAND_BYTE: u8 = 0;
 const PUBLISH_COMMAND_BYTE: u8 = 1;
 const FETCH_COMMAND_BYTE: u8 = 2;
@@ -25,7 +23,7 @@ pub enum Command {
     Unknown,
 }
 
-pub fn parse_command(buf: &[u8]) -> Result<Command, String> {
+pub fn parse_command(buf: &[u8]) -> Result<Command, &str> {
     match buf[0] {
         CREATE_LOG_COMMAND_BYTE => parse_create_log_command(buf),
         PUBLISH_COMMAND_BYTE => parse_publish_log_command(buf),
@@ -34,11 +32,26 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, String> {
     }
 }
 
-fn parse_create_log_command(buf: &[u8]) -> Result<Command, String> {
-    let partitions = buf[1];
-    let name_size = buf[2];
+fn parse_create_log_command(buf: &[u8]) -> Result<Command, &str> {
+    let partitions = match buf.get(1) {
+        Some(partitions) => *partitions,
+        None => {
+            return Err("Unparseable command, unable to parse partitions");
+        }
+    };
+    let name_size = match buf.get(2) {
+        Some(name_size) => *name_size,
+        None => {
+            return Err("Unparseable command, unable to parse name size");
+        }
+    };
 
-    let name = &buf[3..(3 + name_size as usize)];
+    let name = match buf.get(3..(3 + name_size as usize)) {
+        Some(name) => name,
+        None => {
+            return Err("Unparseable command, unable to parse name");
+        }
+    };
     let name = String::from_utf8_lossy(name);
 
     Ok(Command::Create {
@@ -47,17 +60,42 @@ fn parse_create_log_command(buf: &[u8]) -> Result<Command, String> {
     })
 }
 
-fn parse_publish_log_command(buf: &[u8]) -> Result<Command, String> {
-    let partition = buf[1];
-    let name_size = buf[2];
+fn parse_publish_log_command(buf: &[u8]) -> Result<Command, &str> {
+    let partition = match buf.get(1) {
+        Some(partition) => *partition,
+        None => {
+            return Err("Unparseable command, unable to parse partition");
+        }
+    };
+    let name_size = match buf.get(2) {
+        Some(name_size) => *name_size,
+        None => {
+            return Err("Unparseable command, unable to parse name size");
+        }
+    };
 
-    let log_name = &buf[3..(3 + name_size as usize)];
+    let log_name = match buf.get(3..(3 + name_size as usize)) {
+        Some(log_name) => log_name,
+        None => {
+            return Err("Unparseable command, unable to parse name ");
+        }
+    };
     let log_name = String::from_utf8_lossy(log_name);
 
-    let data_size = &buf[(3 + name_size as usize)..(3 + name_size as usize + 8)];
+    let data_size = match buf.get((3 + name_size as usize)..(3 + name_size as usize + 8)) {
+        Some(data_size) => data_size,
+        None => {
+            return Err("Unparseable command, unable to parse data size");
+        }
+    };
     let data_size = usize::from_be_bytes(data_size.try_into().unwrap());
     let mut data = BytesMut::with_capacity(data_size);
-    data.put(&buf[(3 + 8 + name_size as usize)..(3 + 8 + name_size as usize + data_size)]);
+    match buf.get((3 + 8 + name_size as usize)..(3 + 8 + name_size as usize + data_size)) {
+        Some(content) => data.put(content),
+        None => {
+            return Err("Unparseable command, unable to parse data");
+        }
+    }
 
     Ok(Command::Publish {
         log_name: log_name.to_string(),
@@ -66,15 +104,41 @@ fn parse_publish_log_command(buf: &[u8]) -> Result<Command, String> {
     })
 }
 
-fn parse_fetch_log_command(buf: &[u8]) -> Result<Command, String> {
-    let partition = buf[1];
-    let name_size = buf[2];
+fn parse_fetch_log_command(buf: &[u8]) -> Result<Command, &str> {
+    let partition = match buf.get(1) {
+        Some(partition) => *partition,
+        None => {
+            return Err("Unparseable command, unable to parse partition");
+        }
+    };
+    let name_size = match buf.get(2) {
+        Some(name_size) => *name_size,
+        None => {
+            return Err("Unparseable command, unable to parse name size");
+        }
+    };
 
-    let log_name = &buf[3..(3 + name_size as usize)];
+    let log_name = match buf.get(3..(3 + name_size as usize)) {
+        Some(log_name) => log_name,
+        None => {
+            return Err("Unparseable command, unable to parse name");
+        }
+    };
     let log_name = String::from_utf8_lossy(log_name);
 
-    let group_size = buf[3 + name_size as usize];
-    let group = &buf[(4 + name_size as usize)..(4 + name_size as usize + group_size as usize)];
+    let group_size = match buf.get(3 + name_size as usize) {
+        Some(group_size) => *group_size,
+        None => {
+            return Err("Unparseable command, unable to parse group size");
+        }
+    };
+    let group =
+        match buf.get((4 + name_size as usize)..(4 + name_size as usize + group_size as usize)) {
+            Some(group) => group,
+            None => {
+                return Err("Unparseable command, unable to parse group");
+            }
+        };
     let group = String::from_utf8_lossy(group);
 
     Ok(Command::Fetch {
@@ -111,6 +175,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_create_log_command_without_log_name() {
+        let command_byte = 0_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "some.log";
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_create_log_command_without_log_name_size() {
+        let command_byte = 0_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_create_log_command_without_partitions() {
+        let command_byte = 0_u8.to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
     fn parse_publish_command() {
         let command_byte = 1_u8.to_be_bytes();
         let partitions = 10_u8.to_be_bytes();
@@ -141,6 +241,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_publish_command_without_data() {
+        let command_byte = 1_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let content = String::from("event-content");
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+        buf.extend(content.as_bytes().len().to_be_bytes());
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_publish_command_without_data_size() {
+        let command_byte = 1_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_publish_command_without_log_name() {
+        let command_byte = 1_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_publish_command_without_log_name_size() {
+        let command_byte = 1_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_publish_command_without_partitions() {
+        let command_byte = 1_u8.to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
     fn parse_fetch_command() {
         let command_byte = 2_u8.to_be_bytes();
         let partitions = 10_u8.to_be_bytes();
@@ -165,6 +338,79 @@ mod tests {
                 group: "group-name".to_string(),
             }
         )
+    }
+
+    #[test]
+    fn parse_fetch_command_without_group_name() {
+        let command_byte = 2_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let group_name = String::from("group-name");
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+        buf.extend((group_name.as_bytes().len() as u8).to_be_bytes());
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_fetch_command_without_group_name_size() {
+        let command_byte = 2_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+        buf.extend(log_name.as_bytes());
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_fetch_command_without_log_name() {
+        let command_byte = 2_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let log_name = "events.log";
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+        buf.extend((log_name.len() as u8).to_be_bytes());
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_fetch_command_without_log_name_size() {
+        let command_byte = 2_u8.to_be_bytes();
+        let partitions = 10_u8.to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(partitions);
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn parse_fetch_command_without_partitions() {
+        let command_byte = 2_u8.to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_err());
     }
 
     #[test]

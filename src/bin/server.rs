@@ -9,7 +9,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace, warn};
 
-use rog::command::{parse_command, Command, CRLF};
+use rog::command::{parse_command, Command};
 use rog::log::{load_logs, CommitLog, InternalMessage, Logs};
 
 #[derive(Parser, Debug)]
@@ -82,8 +82,8 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     let command = match command {
         Ok(command) => command,
         Err(e) => {
-            let response = format!("-{e}{CRLF}");
-            send_response(&mut stream, response.as_bytes().to_vec()).await;
+            let response = build_error_response(e);
+            send_response(&mut stream, response).await;
             return;
         }
     };
@@ -102,8 +102,8 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
         } => fetch_log(logs, log_name, partition, group).await,
         _ => {
             debug!("command not created yet");
-            let response = format!("-Command not created yet{CRLF}");
-            response.as_bytes().to_vec()
+            let message = "Command not created yet";
+            build_error_response(message)
         }
     };
 
@@ -112,13 +112,13 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
 
 async fn create_log(logs: Logs, name: String, partitions: u8) -> Vec<u8> {
     if partitions == 0 {
-        let response = format!("-Number of partitions must be at least 1{CRLF}");
-        return response.as_bytes().to_vec();
+        let message = "Number of partitions must be at least 1";
+        return build_error_response(message);
     }
 
     if logs.read().await.contains_key(&name) {
-        let response = format!("-Log {name} already exists{CRLF}");
-        return response.as_bytes().to_vec();
+        let message = format!("Log {name} already exists");
+        return build_error_response(&message);
     }
 
     let (commit_log, receivers) = CommitLog::new(name.to_string(), partitions);
@@ -127,13 +127,9 @@ async fn create_log(logs: Logs, name: String, partitions: u8) -> Vec<u8> {
             CommitLog::setup_receivers(receivers, commit_log.name.clone());
             logs.write().await.insert(name.to_string(), commit_log);
             debug!(name = name, partitions = partitions, "Log created");
-            let response = format!("+OK{CRLF}");
-            response.as_bytes().to_vec()
+            0_u8.to_be_bytes().to_vec()
         }
-        Err(e) => {
-            let response = format!("-{e}{CRLF}");
-            response.as_bytes().to_vec()
-        }
+        Err(e) => build_error_response(e),
     }
 }
 
@@ -142,11 +138,11 @@ async fn publish_message(logs: Logs, log_name: String, partition: u8, data: Byte
         Some(log) => {
             let message = InternalMessage::new(partition, data);
             if partition >= log.partitions {
-                let response = format!(
-                    "-Trying to access partition {partition} but log {log_name} has {} partitions{CRLF}",
+                let message = format!(
+                    "Trying to access partition {partition} but log {log_name} has {} partitions",
                     log.partitions
                 );
-                return response.as_bytes().to_vec();
+                return build_error_response(&message);
             }
             match log.send_message(message).await {
                 Ok(_) => {
@@ -155,8 +151,7 @@ async fn publish_message(logs: Logs, log_name: String, partition: u8, data: Byte
                         partition = partition,
                         "Successfully published message"
                     );
-                    let response = format!("+OK{CRLF}");
-                    response.as_bytes().to_vec()
+                    (0_u8).to_be_bytes().to_vec()
                 }
                 Err(e) => {
                     error!(
@@ -165,14 +160,14 @@ async fn publish_message(logs: Logs, log_name: String, partition: u8, data: Byte
                         "Unable to publish message {:?}",
                         e
                     );
-                    let response = format!("-Unable to send message to channel{CRLF}");
-                    response.as_bytes().to_vec()
+                    let message = "Unable to send message to channel";
+                    build_error_response(message)
                 }
             }
         }
         None => {
-            let response = format!("-No log registered with name '{log_name}'{CRLF}");
-            response.as_bytes().to_vec()
+            let message = format!("No log registered with name {log_name}");
+            build_error_response(&message)
         }
     }
 }
@@ -181,20 +176,41 @@ async fn fetch_log(logs: Logs, log_name: String, partition: u8, group: String) -
     match logs.read().await.get(&log_name) {
         Some(log) => {
             let data = match log.fetch_message(partition, group).await {
-                Ok(data) => data,
+                Ok(data) => {
+                    let mut response = BytesMut::with_capacity(1 + 8 + data.capacity());
+                    response.put_u8(0);
+                    response.put_u64(data.capacity() as u64);
+                    response.put(data);
+                    response
+                }
                 Err(e) => {
-                    let mut data = BytesMut::with_capacity(e.len());
-                    data.put(e.as_bytes());
+                    let message_bytes = e.as_bytes();
+                    let mut data = BytesMut::with_capacity(1 + 8 + message_bytes.len());
+                    data.put_u8(1);
+                    data.put_u64(message_bytes.len() as u64);
+                    data.put(message_bytes);
                     data
                 }
             };
             data.to_vec()
         }
         None => {
-            let response = format!("-No log registered with name '{log_name}'{CRLF}");
-            response.as_bytes().to_vec()
+            let message = format!("No log registered with name {log_name}");
+            build_error_response(&message)
         }
     }
+}
+
+/// Builds the standard error response, the first byte is always an u8
+/// 1 to represent the error, the next 8 bytes are the message size
+/// followed by the actual error message.
+fn build_error_response(message: &str) -> Vec<u8> {
+    let message = message.as_bytes();
+    let mut response = Vec::new();
+    response.extend((1_u8).to_be_bytes());
+    response.extend(message.len().to_be_bytes());
+    response.extend(message);
+    response
 }
 
 async fn send_response(stream: &mut TcpStream, response: Vec<u8>) {

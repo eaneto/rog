@@ -1,20 +1,24 @@
-from rog_client import RogClient, CRLF
+from rog_client import RogClient
 
 client = RogClient()
 
 client.connect()
 response = client.create_log("events.log", 10)
-expected_response = f"+OK{CRLF}"
-assert response.decode("utf-8") == expected_response
+expected_response = (0).to_bytes(1, byteorder="big")
+assert response == expected_response
 
 # Trying to create a log with existent log name
 client.connect()
 response = client.create_log("events.log", 10)
-expected_response = f"-Log events.log already exists{CRLF}"
-assert response.decode("utf-8") == expected_response
+assert response[0] == 1
+message_size = int.from_bytes(response[1:9], "big")
+expected_message = f"Log events.log already exists"
+assert response[9:(10+message_size)].decode("utf-8") == expected_message
 
 # Trying to create a log with 0 partitions
 client.connect()
 response = client.create_log("other-events.log", 0)
-expected_response = f"-Number of partitions must be at least 1{CRLF}"
-assert response.decode("utf-8") == expected_response
+assert response[0] == 1
+message_size = int.from_bytes(response[1:9], "big")
+expected_message = f"Number of partitions must be at least 1"
+assert response[9:(10+message_size)].decode("utf-8") == expected_message

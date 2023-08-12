@@ -7,8 +7,6 @@ from typing import Optional
 
 import psutil
 
-CRLF = "\r\n"
-
 
 def initialize_rog_server(profile: str, port: int = 7878, args: Optional[str] = None):
     if profile == "docker":
