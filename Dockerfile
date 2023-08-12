@@ -1,4 +1,4 @@
-FROM rust:1-alpine3.17
+FROM rust:1-alpine3.18
 
 WORKDIR /usr/src/rog
 
@@ -12,8 +12,8 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 
 RUN cargo install --path .
 
-RUN python3 -m pip install protobuf
+RUN python3 -m pip install protobuf pytest
 
 RUN protoc -I=tests/proto --python_out=tests tests/proto/addressbook.proto
 
-RUN python3 tests/test_runner.py docker
+RUN pytest tests --profile=docker

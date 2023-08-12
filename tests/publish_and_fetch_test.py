@@ -7,69 +7,78 @@ from rog_client import (
     send_message_and_check_success,
 )
 
-client = RogClient()
 
-# Test publishing one message to each partition in a log
-create_log_and_check_success(client, "events.log", 10)
+def test_publish_one_message_to_each_partition():
+    client = RogClient()
 
-for i in range(10):
-    send_message_and_check_success(client, "events.log", i, "some data")
+    create_log_and_check_success(client, "events.log", 10)
+
+    for i in range(10):
+        send_message_and_check_success(client, "events.log", i, "some data")
+
+        sleep(0.1)
+
+        expected_response = "some data"
+        fetch_message_and_check_success(
+            client, "events.log", i, "test-group", expected_response
+        )
+
+
+def test_publishing_more_than_one_message_to_same_partitions():
+    client = RogClient()
+    create_log_and_check_success(client, "events.log", 10)
+    send_message_and_check_success(client, "events.log", 0, "first message")
+    send_message_and_check_success(client, "events.log", 0, "second message")
 
     sleep(0.1)
 
-    expected_response = "some data"
+    expected_response = f"first message"
     fetch_message_and_check_success(
-        client, "events.log", i, "test-group", expected_response
+        client, "events.log", 0, "test-group", expected_response
     )
 
-# Test publishing more than one message to same partition
-send_message_and_check_success(client, "events.log", 0, "first message")
-send_message_and_check_success(client, "events.log", 0, "second message")
+    expected_response = f"second message"
+    fetch_message_and_check_success(
+        client, "events.log", 0, "test-group", expected_response
+    )
 
-sleep(0.1)
 
-expected_response = f"first message"
-fetch_message_and_check_success(
-    client, "events.log", 0, "test-group", expected_response
-)
+def test_fetching_data_from_same_partition_with_differente_groups():
+    client = RogClient()
+    create_log_and_check_success(client, "other-events.log", 10)
 
-expected_response = f"second message"
-fetch_message_and_check_success(
-    client, "events.log", 0, "test-group", expected_response
-)
+    send_message_and_check_success(client, "other-events.log", 0, "first message")
+    send_message_and_check_success(client, "other-events.log", 0, "second message")
 
-# Test fetching data from same partition with different groups
-create_log_and_check_success(client, "other-events.log", 10)
+    sleep(0.1)
 
-send_message_and_check_success(client, "other-events.log", 0, "first message")
-send_message_and_check_success(client, "other-events.log", 0, "second message")
+    expected_response = f"first message"
+    fetch_message_and_check_success(
+        client, "other-events.log", 0, "test-group-1", expected_response
+    )
 
-sleep(0.1)
+    expected_response = f"second message"
+    fetch_message_and_check_success(
+        client, "other-events.log", 0, "test-group-1", expected_response
+    )
 
-expected_response = f"first message"
-fetch_message_and_check_success(
-    client, "other-events.log", 0, "test-group-1", expected_response
-)
+    expected_response = f"first message"
+    fetch_message_and_check_success(
+        client, "other-events.log", 0, "test-group-2", expected_response
+    )
 
-expected_response = f"second message"
-fetch_message_and_check_success(
-    client, "other-events.log", 0, "test-group-1", expected_response
-)
+    expected_response = f"second message"
+    fetch_message_and_check_success(
+        client, "other-events.log", 0, "test-group-2", expected_response
+    )
 
-expected_response = f"first message"
-fetch_message_and_check_success(
-    client, "other-events.log", 0, "test-group-2", expected_response
-)
 
-expected_response = f"second message"
-fetch_message_and_check_success(
-    client, "other-events.log", 0, "test-group-2", expected_response
-)
-
-# Fetch data from a log with no data left
-client.connect()
-response = client.fetch_log("other-events.log", 0, "test-group-2")
-assert response[0] == 1
-message_size = int.from_bytes(response[1:9], "big")
-expected_message = "No data left in the log to be read"
-assert response[9 : (10 + message_size)].decode("utf-8") == expected_message
+def test_fetch_data_from_a_log_with_no_data_left():
+    client = RogClient()
+    create_log_and_check_success(client, "other-events.log", 10)
+    client.connect()
+    response = client.fetch_log("other-events.log", 0, "test-group-2")
+    assert response[0] == 1
+    message_size = int.from_bytes(response[1:9], "big")
+    expected_message = "No data left in the log to be read"
+    assert response[9 : (10 + message_size)].decode("utf-8") == expected_message
