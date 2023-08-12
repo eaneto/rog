@@ -128,6 +128,15 @@ def send_message_and_check_success(
     assert response == expected_response
 
 
+def send_binary_message_and_check_success(
+    client: RogClient, log_name: str, partition: int, message: bytes
+):
+    client.connect()
+    response = client.send_binary_message(log_name, partition, message)
+    expected_response = (0).to_bytes(1, byteorder="big")
+    assert response == expected_response
+
+
 def fetch_message_and_check_success(
     client: RogClient,
     log_name: str,
@@ -142,3 +151,19 @@ def fetch_message_and_check_success(
     assert response[0:1] == success_byte
     message_size = int.from_bytes(response[1:9], "big")
     assert response[9 : (10 + message_size)].decode("utf-8") == expected_message
+
+
+def fetch_binary_message_and_check_success(
+    client: RogClient,
+    log_name: str,
+    partition: int,
+    group: str,
+    expected_message: bytes,
+    buffer_size: int = 1024,
+):
+    client.connect()
+    response = client.fetch_log(log_name, partition, group, buffer_size)
+    success_byte = (0).to_bytes(1, byteorder="big")
+    assert response[0:1] == success_byte
+    message_size = int.from_bytes(response[1:9], "big")
+    assert response[9 : (10 + message_size)] == expected_message
