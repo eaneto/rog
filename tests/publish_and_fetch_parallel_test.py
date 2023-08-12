@@ -1,14 +1,11 @@
 import string
+from multiprocessing import Pool, cpu_count
+from random import choices, randint
+from time import sleep
 from typing import Dict, List
 
 from addressbook_pb2 import Person
-from multiprocessing import Pool, cpu_count
-from time import sleep
-from random import randint, choices
-
 from rog_client import RogClient, create_log_and_check_success
-
-client = RogClient()
 
 
 def build_random_person_object() -> Person:
@@ -33,7 +30,7 @@ def build_random_person_object() -> Person:
     return person
 
 
-def publish_proto(person_proto: Person, partition: int):
+def publish_proto(client: RogClient, person_proto: Person, partition: int):
     data = person_proto.SerializeToString()
     client.connect()
     response = client.send_binary_message("proto-events.log", partition, data)
@@ -41,7 +38,7 @@ def publish_proto(person_proto: Person, partition: int):
     assert response == expected_response
 
 
-def fetch_all_events_from_partition(messages, partition):
+def fetch_all_events_from_partition(client: RogClient, messages, partition):
     for person in messages:
         client.connect()
         response = client.fetch_log("proto-events.log", partition, "proto-group")
@@ -57,33 +54,34 @@ def fetch_all_events_from_partition(messages, partition):
         assert response_person.phones == person.phones
 
 
-# Test publishing one message to each partition in a log
-create_log_and_check_success(client, "proto-events.log", 10)
+def test_publishing_one_message_to_each_partition_on_log_in_parallel():
+    client = RogClient()
 
-messages_by_partition: Dict[int, List[Person]] = {}
-print(f"Running test with {cpu_count()} processes")
-with Pool(cpu_count()) as pool:
-    for i in range(100):
-        partition = i % 10
-        message = build_random_person_object()
+    create_log_and_check_success(client, "proto-events.log", 10)
 
-        if partition in messages_by_partition:
-            messages_by_partition[partition].append(message)
-        else:
-            messages_by_partition[partition] = []
-            messages_by_partition[partition].append(message)
+    messages_by_partition: Dict[int, List[Person]] = {}
+    print(f"Running test with {cpu_count()} processes")
+    with Pool(cpu_count()) as pool:
+        for i in range(100):
+            partition = i % 10
+            message = build_random_person_object()
 
-        pool.apply_async(publish_proto, (message, partition))
+            if partition in messages_by_partition:
+                messages_by_partition[partition].append(message)
+            else:
+                messages_by_partition[partition] = []
+                messages_by_partition[partition].append(message)
 
-    pool.close()
-    pool.join()
+            pool.apply_async(publish_proto, (message, partition))
 
-sleep(1)
+        pool.close()
+        pool.join()
 
+    sleep(1)
 
-with Pool(cpu_count()) as pool:
-    for partition, messages in messages_by_partition.items():
-        pool.apply_async(fetch_all_events_from_partition, (messages, partition))
+    with Pool(cpu_count()) as pool:
+        for partition, messages in messages_by_partition.items():
+            pool.apply_async(fetch_all_events_from_partition, (messages, partition))
 
-    pool.close()
-    pool.join()
+        pool.close()
+        pool.join()

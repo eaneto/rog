@@ -1,4 +1,5 @@
 import os
+import shutil
 import signal
 import socket as s
 import subprocess
@@ -6,6 +7,19 @@ import time
 from typing import Optional
 
 import psutil
+
+
+def setup_rog_server(request) -> int:
+    profile = request.config.getoption("--profile")
+
+    os.environ["ROG_HOME"] = "/tmp/rog"
+    try:
+        shutil.rmtree("/tmp/rog")
+    except FileNotFoundError:
+        pass
+
+    os.mkdir("/tmp/rog")
+    return initialize_rog_server(profile)
 
 
 def initialize_rog_server(profile: str, port: int = 7878, args: Optional[str] = None):
@@ -17,6 +31,8 @@ def initialize_rog_server(profile: str, port: int = 7878, args: Optional[str] = 
     if args is not None:
         command.extend(args.split(" "))
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if process.returncode != 0:
+        print(process.stdout)
     time.sleep(0.5)
     return process.pid
 

@@ -13,13 +13,20 @@ To build both the cli and the server you can just run `cargo build
 
 ## Integration tests
 
-The integration tests are written in python. You can install the
-dependencies with pip: `pip install -r tests/requirements.txt`. The
-tests use protobuf for a few scenarios, so you need the protobuf
-compiler, you can generated the necessary files running this command:
+The integration tests are written in python with [pytest][1]. You can
+install the dependencies with pip: `pip install -r
+tests/requirements.txt`. The tests use protobuf for a few scenarios,
+so you need the protobuf compiler, you can generated the necessary
+files running this command:
 
 ```shell
 protoc -I=tests/proto --python_out=tests tests/proto/addressbook.proto
+```
+
+And to execute all tests you can run:
+
+```shell
+pytest tests
 ```
 
 If you don't want to install protoc you can run the tests with the
@@ -120,3 +127,4 @@ All commands have the same possible error response.
 | Message      | String | Detailed error message                             |
 
 [0]: https://kafka.apache.org/
+[1]: https://docs.pytest.org/en/7.4.x/
