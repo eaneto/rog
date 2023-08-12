@@ -6,7 +6,7 @@ from multiprocessing import Pool, cpu_count
 from time import sleep
 from random import randint, choices
 
-from rog_client import RogClient
+from rog_client import RogClient, create_log_and_check_success
 
 client = RogClient()
 
@@ -14,9 +14,13 @@ client = RogClient()
 def build_random_person_object() -> Person:
     person = Person()
     person.id = randint(1, 100)
-    person.name = ''.join(choices(string.ascii_letters + string.digits, k=randint(10, 25)))
-    email_name = ''.join(choices(string.ascii_letters + string.digits, k=randint(5, 15)))
-    email_at = ''.join(choices(string.ascii_letters + string.digits, k=randint(4, 25)))
+    person.name = "".join(
+        choices(string.ascii_letters + string.digits, k=randint(10, 25))
+    )
+    email_name = "".join(
+        choices(string.ascii_letters + string.digits, k=randint(5, 15))
+    )
+    email_at = "".join(choices(string.ascii_letters + string.digits, k=randint(4, 25)))
     person.email = email_name + "@" + email_at + ".com"
 
     for _ in range(0, randint(1, 10)):
@@ -46,7 +50,7 @@ def fetch_all_events_from_partition(messages, partition):
         message_size = int.from_bytes(response[1:9], "big")
 
         response_person = Person()
-        response_person.ParseFromString(response[9:(10+message_size)])
+        response_person.ParseFromString(response[9 : (10 + message_size)])
         assert response_person.id == person.id
         assert response_person.name == person.name
         assert response_person.email == person.email
@@ -54,10 +58,7 @@ def fetch_all_events_from_partition(messages, partition):
 
 
 # Test publishing one message to each partition in a log
-client.connect()
-response = client.create_log("proto-events.log", 10)
-expected_response = (0).to_bytes(1, byteorder="big")
-assert response == expected_response
+create_log_and_check_success(client, "proto-events.log", 10)
 
 messages_by_partition: Dict[int, List[Person]] = {}
 print(f"Running test with {cpu_count()} processes")

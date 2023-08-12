@@ -1,7 +1,7 @@
 from time import sleep
 
 from addressbook_pb2 import Person
-from rog_client import RogClient
+from rog_client import RogClient, create_log_and_check_success
 from random import randint
 
 
@@ -20,10 +20,7 @@ def build_person_object():
 client = RogClient()
 
 # Send one protobuf message
-client.connect()
-response = client.create_log("proto-events.log", 10)
-expected_response = (0).to_bytes(1, byteorder="big")
-assert response == expected_response
+create_log_and_check_success(client, "proto-events.log", 10)
 
 person = build_person_object()
 data = person.SerializeToString()
@@ -42,7 +39,7 @@ assert response[0:1] == success_byte
 message_size = int.from_bytes(response[1:9], "big")
 
 response_person = Person()
-response_person.ParseFromString(response[9:(10+message_size)])
+response_person.ParseFromString(response[9 : (10 + message_size)])
 assert response_person.id == person.id
 assert response_person.name == person.name
 assert response_person.email == person.email
@@ -70,7 +67,7 @@ for person in persons:
     message_size = int.from_bytes(response[1:9], "big")
 
     response_person = Person()
-    response_person.ParseFromString(response[9:(10+message_size)])
+    response_person.ParseFromString(response[9 : (10 + message_size)])
     assert response_person.id == person.id
     assert response_person.name == person.name
     assert response_person.email == person.email
