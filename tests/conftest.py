@@ -1,6 +1,6 @@
 import pytest
 
-from rog_client import kill_rog_server, setup_rog_server
+from rog_setup import kill_rog_server, setup_rog_server
 
 
 def pytest_addoption(parser):
