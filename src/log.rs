@@ -24,13 +24,10 @@ pub struct CommitLog {
 }
 
 impl CommitLog {
-    pub fn new(
-        name: String,
-        number_of_partitions: u8,
-    ) -> (CommitLog, Vec<Receiver<InternalMessage>>) {
+    pub fn new(name: String, partitions: u8) -> (CommitLog, Vec<Receiver<InternalMessage>>) {
         let mut senders = Vec::new();
         let mut receivers = Vec::new();
-        for _ in 0..number_of_partitions {
+        for _ in 0..partitions {
             // TODO Revisit buffer size(or make it configurable).
             let (tx, rx) = mpsc::channel(100);
             senders.push(tx);
@@ -45,7 +42,7 @@ impl CommitLog {
         (
             CommitLog {
                 name,
-                partitions: number_of_partitions,
+                partitions,
                 senders,
                 rog_home,
             },
@@ -136,7 +133,7 @@ impl CommitLog {
         // also 8 bytes, so the message size ends at the 16th
         // position.
         let mut message_size_end = 16;
-        let message: Record = loop {
+        let message: Entry = loop {
             if let Err(e) = log_file.seek(io::SeekFrom::Start(id_start as u64)).await {
                 panic!("Unable to seek file at position {id_start} {e}")
             }
@@ -166,7 +163,7 @@ impl CommitLog {
                     panic!("Unable to read log file at byte {message_size_end} {e}");
                 }
                 break match bincode::deserialize(&buf) {
-                    Ok(record) => record,
+                    Ok(entry) => entry,
                     Err(e) => panic!("Unable to deserialize saved message on log {e}"),
                 };
             } else {
@@ -275,10 +272,10 @@ impl CommitLogReceiver {
 
             let log_file_name = self.find_log_file(id, partition).await;
 
-            let record = Record::new(internal_message);
-            let record_in_storage_format = self.build_record_in_storage_format(&record, id);
+            let entry = Entry::new(internal_message);
+            let entry_in_storage_format = self.build_entry_in_storage_format(&entry, id);
 
-            self.save_log_to_file(log_file_name, record_in_storage_format)
+            self.save_log_to_file(log_file_name, entry_in_storage_format)
                 .await;
 
             self.save_id_file(id, partition).await;
@@ -313,25 +310,25 @@ impl CommitLogReceiver {
         bincode::deserialize(&buf)
     }
 
-    /// Build the message in the format used in storage.
+    /// Build the entry in the format used in storage.
     ///
     /// The first 8 bytes are the message id, stored in the big endian
     /// format. The following 8 bytes are the message size also stored
     /// as a big endian. The other bytes are the actual content of the
-    /// message received stored as a [Record], with the data and the
+    /// message received stored as an [Entry], with the data and the
     /// producer timestamp.
-    fn build_record_in_storage_format(&self, record: &Record, id: usize) -> Vec<u8> {
-        let record = match bincode::serialize(record) {
-            Ok(message) => message,
-            Err(e) => panic!("Unable to serialize record to binary {e}"),
+    fn build_entry_in_storage_format(&self, entry: &Entry, id: usize) -> Vec<u8> {
+        let entry = match bincode::serialize(entry) {
+            Ok(entry) => entry,
+            Err(e) => panic!("Unable to serialize entry to binary {e}"),
         };
-        let record_size = record.len().to_be_bytes();
+        let entry_size = entry.len().to_be_bytes();
         let binary_id = id.to_be_bytes();
-        let mut storable_record = Vec::new();
-        storable_record.extend(binary_id);
-        storable_record.extend(record_size);
-        storable_record.extend(record);
-        storable_record
+        let mut storable_entry = Vec::new();
+        storable_entry.extend(binary_id);
+        storable_entry.extend(entry_size);
+        storable_entry.extend(entry);
+        storable_entry
     }
 
     async fn find_log_file(&self, id: usize, partition: u8) -> String {
@@ -346,12 +343,12 @@ impl CommitLogReceiver {
         };
 
         // Is current log file full?  This doesn't actually guarantee
-        // that the file will have 8kB, because messages are not split
-        // in different files, so if two 5kB messages arrive and are
-        // written to a new log file the file will have 10kB. But this
-        // condition guarantees that the next 5kB message will be
-        // written in a new log file.
-        if log_file.metadata().await.unwrap().len() >= 8 * 1024 {
+        // that the file will have 1MiB, because messages are not
+        // split in different files, so if two 0.6MiB messages arrive
+        // and are written to a new log file the file will have
+        // 1.2MiB. But this condition guarantees that the next 0.6MiB
+        // message will be written in a new log file.
+        if log_file.metadata().await.unwrap().len() >= 1024 * 1024 {
             let log_file_name = format!("{}/{}/{partition}/{id}.log", self.rog_home, self.name);
             match File::create(&log_file_name).await {
                 Ok(_) => debug!("Created new log file for {id}"),
@@ -448,14 +445,14 @@ impl InternalMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Record {
+pub struct Entry {
     data: BytesMut,
     timestamp: SystemTime,
 }
 
-impl Record {
-    pub fn new(internal_message: InternalMessage) -> Record {
-        Record {
+impl Entry {
+    pub fn new(internal_message: InternalMessage) -> Entry {
+        Entry {
             data: internal_message.data,
             timestamp: internal_message.timestamp,
         }
@@ -464,6 +461,9 @@ impl Record {
 
 pub type Logs = Arc<RwLock<HashMap<String, CommitLog>>>;
 
+/// Reads the created logs in rog home and loads them in memory. This
+/// function is used when rog starts up so that the clients can
+/// publish and fetch messages.
 pub async fn load_logs(logs: Logs) {
     let rog_home = match env::var("ROG_HOME") {
         Ok(path) => path,
@@ -503,7 +503,7 @@ pub async fn load_logs(logs: Logs) {
 #[cfg(test)]
 mod tests {
     use crate::log::*;
-    use std::env::set_var;
+    use std::env::{remove_var, set_var};
 
     #[test]
     fn create_new_commit_log() {
@@ -517,6 +517,16 @@ mod tests {
         assert_eq!(commit_log.senders.len() as u8, partitions);
         assert_eq!(commit_log.name, log_name);
         assert_eq!(commit_log.partitions, partitions);
+    }
+
+    #[test]
+    #[should_panic]
+    fn try_to_create_new_commit_log_without_rog_home_set() {
+        let log_name = "log.name".to_string();
+        let partitions = 10;
+
+        remove_var("ROG_HOME");
+        CommitLog::new(log_name, partitions);
     }
 
     #[tokio::test]
