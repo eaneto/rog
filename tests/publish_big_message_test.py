@@ -9,7 +9,6 @@ from rog_client import (
 )
 
 log_name = "big-packets.log"
-data = os.urandom(1024 * 5)
 
 
 def test_send_message_with_5kb():
@@ -17,25 +16,32 @@ def test_send_message_with_5kb():
 
     create_log_and_check_success(client, log_name, 2)
 
+    data = os.urandom(1024 * 5)
+
     send_binary_message_and_check_success(client, log_name, 0, data)
 
     sleep(0.1)
 
     fetch_binary_message_and_check_success(
-        client, log_name, 0, "test-group", data, 5150
+        client, log_name, 0, "test-group", data, (1024 * 5 + 9)
     )
 
 
 # Send multiple big messages
-def test_send_multiple_messages_over_5kb():
+def test_send_multiple_messages_with_600kB():
     client = RogClient()
+
     create_log_and_check_success(client, log_name, 2)
+
+    multiplier = 6
+    data = os.urandom(1024 * multiplier)
+
     for _ in range(10):
         send_binary_message_and_check_success(client, log_name, 0, data)
 
-        sleep(0.1)
+    sleep(0.1)
 
     for _ in range(10):
         fetch_binary_message_and_check_success(
-            client, log_name, 0, "test-group", data, 5150
+            client, log_name, 0, "test-group", data, (1024 * multiplier + 9)
         )

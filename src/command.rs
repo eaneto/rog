@@ -24,7 +24,12 @@ pub enum Command {
 }
 
 pub fn parse_command(buf: &[u8]) -> Result<Command, &str> {
-    match buf[0] {
+    let command_byte = match buf.first() {
+        Some(command_byte) => *command_byte,
+        None => return Err("Unable to parse command byte"),
+    };
+
+    match command_byte {
         CREATE_LOG_COMMAND_BYTE => parse_create_log_command(buf),
         PUBLISH_COMMAND_BYTE => parse_publish_log_command(buf),
         FETCH_COMMAND_BYTE => parse_fetch_log_command(buf),

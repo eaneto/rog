@@ -57,24 +57,27 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     let mut cursor = 0;
     let mut buf = vec![0u8; 4096];
     loop {
+        if cursor != 0 && parse_command(&buf).is_ok() {
+            break;
+        }
+
         if buf.len() == cursor {
             buf.resize(cursor * 2, 0);
         }
 
         let bytes_read = match stream.read(&mut buf[cursor..]).await {
             Ok(size) => size,
-            Err(_) => break,
+            Err(e) => {
+                debug!("error reading tcp stream to parse command {e}");
+                break;
+            }
         };
 
         if bytes_read == 0 {
             break;
         }
 
-        if bytes_read < buf.len() {
-            break;
-        } else {
-            cursor += bytes_read;
-        }
+        cursor += bytes_read;
     }
 
     let command = parse_command(&buf);
