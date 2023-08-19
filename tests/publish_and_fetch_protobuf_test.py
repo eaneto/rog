@@ -20,19 +20,20 @@ def build_person_object():
 def test_send_one_protobuf_message():
     client = RogClient()
 
-    create_log_and_check_success(client, "proto-events.log", 10)
+    log_name = "single-proto-event.log"
+    create_log_and_check_success(client, log_name, 10)
 
     person = build_person_object()
     data = person.SerializeToString()
     client.connect()
-    response = client.send_binary_message("proto-events.log", 0, data)
+    response = client.send_binary_message(log_name, 0, data)
     expected_response = (0).to_bytes(1, byteorder="big")
     assert response == expected_response
 
     sleep(0.1)
 
     client.connect()
-    response = client.fetch_log("proto-events.log", 0, "proto-group")
+    response = client.fetch_log(log_name, 0, "proto-group")
 
     success_byte = (0).to_bytes(1, byteorder="big")
     assert response[0:1] == success_byte
@@ -48,8 +49,9 @@ def test_send_one_protobuf_message():
 
 def test_send_multiple_protobuf_messages_to_same_partition():
     client = RogClient()
+    log_name = "multiple-proto-events.log"
 
-    create_log_and_check_success(client, "proto-events.log", 10)
+    create_log_and_check_success(client, log_name, 10)
 
     persons = []
     for i in range(25):
@@ -57,7 +59,7 @@ def test_send_multiple_protobuf_messages_to_same_partition():
         persons.append(person)
         data = person.SerializeToString()
         client.connect()
-        response = client.send_binary_message("proto-events.log", 2, data)
+        response = client.send_binary_message(log_name, 2, data)
         expected_response = (0).to_bytes(1, byteorder="big")
         assert response == expected_response
 
@@ -65,7 +67,7 @@ def test_send_multiple_protobuf_messages_to_same_partition():
 
     for person in persons:
         client.connect()
-        response = client.fetch_log("proto-events.log", 2, "proto-group")
+        response = client.fetch_log(log_name, 2, "proto-group")
 
         success_byte = (0).to_bytes(1, byteorder="big")
         assert response[0:1] == success_byte
