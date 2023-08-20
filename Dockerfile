@@ -16,4 +16,4 @@ RUN python3 -m pip install protobuf pytest
 
 RUN protoc -I=tests/proto --python_out=tests tests/proto/addressbook.proto
 
-RUN pytest tests --profile=docker
+RUN pytest -s tests --profile=docker

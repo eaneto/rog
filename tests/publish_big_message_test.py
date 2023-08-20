@@ -8,11 +8,10 @@ from rog_client import (
     send_binary_message_and_check_success,
 )
 
-log_name = "big-packets.log"
-
 
 def test_send_message_with_5kb():
     client = RogClient()
+    log_name = "single-big-message.log"
 
     create_log_and_check_success(client, log_name, 2)
 
@@ -27,9 +26,9 @@ def test_send_message_with_5kb():
     )
 
 
-# Send multiple big messages
 def test_send_multiple_messages_with_600kB():
     client = RogClient()
+    log_name = "multiple-big-messages.log"
 
     create_log_and_check_success(client, log_name, 2)
 
