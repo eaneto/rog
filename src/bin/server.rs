@@ -9,8 +9,11 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace, warn};
 
-use rog::command::{parse_command, Command};
 use rog::log::{load_logs, CommitLog, InternalMessage, Logs};
+use rog::{
+    command::{parse_command, Command},
+    log::LogFiles,
+};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -34,18 +37,20 @@ async fn main() {
     };
 
     let logs = Arc::new(RwLock::new(HashMap::<String, CommitLog>::new()));
-    load_logs(logs.clone()).await;
+    let log_files = Arc::new(RwLock::new(HashMap::new()));
+    load_logs(logs.clone(), log_files.clone()).await;
 
-    handle_connections(listener, logs).await;
+    handle_connections(listener, logs, log_files).await;
 }
 
-async fn handle_connections(listener: TcpListener, logs: Logs) {
+async fn handle_connections(listener: TcpListener, logs: Logs, log_files: LogFiles) {
     loop {
         let logs = logs.clone();
+        let log_files = log_files.clone();
         match listener.accept().await {
             Ok((stream, _)) => {
                 tokio::spawn(async move {
-                    handle_connection(stream, logs).await;
+                    handle_connection(stream, logs, log_files).await;
                 });
             }
             Err(e) => warn!("Error listening o socket {e}"),
@@ -53,7 +58,7 @@ async fn handle_connections(listener: TcpListener, logs: Logs) {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, logs: Logs) {
+async fn handle_connection(mut stream: TcpStream, logs: Logs, log_files: LogFiles) {
     let mut cursor = 0;
     let mut buf = vec![0u8; 4096];
     loop {
@@ -92,7 +97,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     };
 
     let response = match command {
-        Command::Create { name, partitions } => create_log(logs, name, partitions).await,
+        Command::Create { name, partitions } => create_log(logs, log_files, name, partitions).await,
         Command::Publish {
             log_name,
             partition,
@@ -102,7 +107,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
             log_name,
             partition,
             group,
-        } => fetch_log(logs, log_name, partition, group).await,
+        } => fetch_log(logs, log_files, log_name, partition, group).await,
         _ => {
             debug!("command not created yet");
             let message = "Command not created yet";
@@ -113,7 +118,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs) {
     send_response(&mut stream, response).await;
 }
 
-async fn create_log(logs: Logs, name: String, partitions: u8) -> Vec<u8> {
+async fn create_log(logs: Logs, log_files: LogFiles, name: String, partitions: u8) -> Vec<u8> {
     if partitions == 0 {
         let message = "Number of partitions must be at least 1";
         return build_error_response(message);
@@ -127,7 +132,13 @@ async fn create_log(logs: Logs, name: String, partitions: u8) -> Vec<u8> {
     let (commit_log, receivers) = CommitLog::new(name.to_string(), partitions);
     match commit_log.create_log_files().await {
         Ok(()) => {
-            CommitLog::setup_receivers(receivers, commit_log.name.clone());
+            CommitLog::setup_receivers(receivers, commit_log.name.clone(), &log_files);
+            let mut log_files = log_files.write().await;
+            let mut log_files_by_partition = Vec::new();
+            for _ in 0..commit_log.partitions {
+                log_files_by_partition.push(RwLock::new(vec![0]));
+            }
+            log_files.insert(name.clone(), log_files_by_partition);
             logs.write().await.insert(name.to_string(), commit_log);
             debug!(name = name, partitions = partitions, "Log created");
             0_u8.to_be_bytes().to_vec()
@@ -175,10 +186,16 @@ async fn publish_message(logs: Logs, log_name: String, partition: u8, data: Byte
     }
 }
 
-async fn fetch_log(logs: Logs, log_name: String, partition: u8, group: String) -> Vec<u8> {
+async fn fetch_log(
+    logs: Logs,
+    log_files: LogFiles,
+    log_name: String,
+    partition: u8,
+    group: String,
+) -> Vec<u8> {
     match logs.read().await.get(&log_name) {
         Some(log) => {
-            let data = match log.fetch_message(partition, group).await {
+            let data = match log.fetch_message(log_files, partition, group).await {
                 Ok(data) => {
                     let mut response = BytesMut::with_capacity(1 + 8 + data.capacity());
                     response.put_u8(0);
