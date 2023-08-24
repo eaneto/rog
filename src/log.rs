@@ -101,7 +101,11 @@ impl CommitLog {
     }
 
     /// Initialize a list a receivers to run in background tasks.
-    pub fn setup_receivers(receivers: Vec<Receiver<InternalMessage>>, log_name: String) {
+    pub fn setup_receivers(
+        receivers: Vec<Receiver<InternalMessage>>,
+        log_name: String,
+        log_files: &LogFiles,
+    ) {
         let mut ids = Vec::new();
         for _ in 0..receivers.len() {
             ids.push(Mutex::new(0_usize));
@@ -111,20 +115,27 @@ impl CommitLog {
         for receiver in receivers {
             let log_name = log_name.clone();
             let ids = ids.clone();
+            let log_files = log_files.clone();
             tokio::spawn(async move {
                 let ids = ids.clone();
+                let log_files = log_files.clone();
                 let log_receiver = CommitLogReceiver::new(log_name);
-                log_receiver.handle_receiver(ids, receiver).await;
+                log_receiver.handle_receiver(ids, receiver, log_files).await;
             });
         }
     }
 
-    pub async fn fetch_message(&self, partition: u8, group: String) -> Result<BytesMut, &str> {
+    pub async fn fetch_message(
+        &self,
+        log_files: LogFiles,
+        partition: u8,
+        group: String,
+    ) -> Result<BytesMut, &str> {
         self.create_offset_files(&group).await?;
 
         let mut offset: usize = self.load_offset(partition, &group).await;
 
-        let log_file_name = self.find_log_file(offset, partition);
+        let log_file_name = self.find_log_file(log_files, offset, partition).await;
 
         let mut log_file = File::open(log_file_name).await.unwrap();
         // First id starts as the first 8 bytes of the file.
@@ -205,8 +216,8 @@ impl CommitLog {
         Ok(())
     }
 
-    fn find_log_file(&self, offset: usize, partition: u8) -> String {
-        find_log_file_by_id(&self.rog_home, &self.name, offset, partition)
+    async fn find_log_file(&self, log_files: LogFiles, offset: usize, partition: u8) -> String {
+        find_log_file_by_id(&log_files, &self.rog_home, &self.name, offset, partition).await
     }
 
     async fn load_offset(&self, partition: u8, group: &String) -> usize {
@@ -264,13 +275,14 @@ impl CommitLogReceiver {
         &self,
         ids: Arc<Vec<Mutex<usize>>>,
         mut receiver: Receiver<InternalMessage>,
+        log_files: LogFiles,
     ) {
         // TODO Micro-batching
         while let Some(internal_message) = receiver.recv().await {
             let partition = internal_message.partition;
             let id = self.load_most_recent_id(&ids, partition).await;
 
-            let log_file_name = self.find_log_file(id, partition).await;
+            let log_file_name = self.find_log_file(&log_files, id, partition).await;
 
             let entry = Entry::new(internal_message);
             let entry_in_storage_format = self.build_entry_in_storage_format(&entry, id);
@@ -331,8 +343,9 @@ impl CommitLogReceiver {
         storable_entry
     }
 
-    async fn find_log_file(&self, id: usize, partition: u8) -> String {
-        let log_file_name = find_log_file_by_id(&self.rog_home, &self.name, id, partition);
+    async fn find_log_file(&self, log_files: &LogFiles, id: usize, partition: u8) -> String {
+        let log_file_name =
+            find_log_file_by_id(log_files, &self.rog_home, &self.name, id, partition).await;
 
         let result = File::open(&log_file_name).await;
         let log_file = match result {
@@ -354,6 +367,9 @@ impl CommitLogReceiver {
                 Ok(_) => debug!("Created new log file for {id}"),
                 Err(e) => panic!("Unable to create new log file at {log_file_name} {e}"),
             }
+            let log_files = log_files.read().await;
+            let files = log_files.get(&self.name).unwrap();
+            files[partition as usize].write().await.push(id);
             log_file_name
         } else {
             log_file_name
@@ -388,35 +404,18 @@ impl CommitLogReceiver {
     }
 }
 
-fn find_log_file_by_id(rog_home: &String, name: &String, id: usize, partition: u8) -> String {
-    // TODO Keep all entries in memory
-    let mut log_files: Vec<usize> = std::fs::read_dir(format!("{}/{}/{partition}", rog_home, name))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension() == Some(OsStr::from_bytes(b"log")))
-        .map(|file| {
-            file.path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-                .strip_suffix(".log")
-                .unwrap()
-                .parse::<usize>()
-                .unwrap()
-        })
-        .collect();
-    log_files.sort();
-
-    let mut log_file_matching_id = None;
-    for files in log_files.windows(2) {
-        if id >= files[0] && id < files[1] {
-            log_file_matching_id = Some(files[0]);
-            break;
-        }
-    }
-
-    match log_file_matching_id {
+async fn find_log_file_by_id(
+    log_files: &LogFiles,
+    rog_home: &String,
+    name: &String,
+    id: usize,
+    partition: u8,
+) -> String {
+    let log_files = &log_files.read().await;
+    let log_files = &log_files.get(name).unwrap()[partition as usize]
+        .read()
+        .await;
+    match find_log_by_matching_id(log_files, id) {
         Some(file_name) => format!("{}/{}/{partition}/{}.log", rog_home, name, file_name),
         None => format!(
             "{}/{}/{partition}/{}.log",
@@ -425,6 +424,15 @@ fn find_log_file_by_id(rog_home: &String, name: &String, id: usize, partition: u
             log_files.last().unwrap()
         ),
     }
+}
+
+fn find_log_by_matching_id(log_files: &[usize], id: usize) -> Option<usize> {
+    for files in log_files.windows(2) {
+        if id >= files[0] && id < files[1] {
+            return Some(files[0]);
+        }
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -460,11 +468,12 @@ impl Entry {
 }
 
 pub type Logs = Arc<RwLock<HashMap<String, CommitLog>>>;
+pub type LogFiles = Arc<RwLock<HashMap<String, Vec<RwLock<Vec<usize>>>>>>;
 
 /// Reads the created logs in rog home and loads them in memory. This
 /// function is used when rog starts up so that the clients can
 /// publish and fetch messages.
-pub async fn load_logs(logs: Logs) {
+pub async fn load_logs(logs: Logs, log_files: LogFiles) {
     let rog_home = match env::var("ROG_HOME") {
         Ok(path) => path,
         Err(e) => panic!("ROG_HOME enrivonment variable not set {e}"),
@@ -494,8 +503,37 @@ pub async fn load_logs(logs: Logs) {
             log_name = log_name,
             "Loading log to memory",
         );
+
+        let mut log_files_by_partition = Vec::new();
+        for partition in 0..partitions {
+            let mut log_files: Vec<usize> =
+                std::fs::read_dir(format!("{}/{}/{partition}", rog_home, log_name))
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.path().extension() == Some(OsStr::from_bytes(b"log")))
+                    .map(|file| {
+                        file.path()
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned()
+                            .strip_suffix(".log")
+                            .unwrap()
+                            .parse::<usize>()
+                            .unwrap()
+                    })
+                    .collect();
+            log_files.sort();
+            log_files_by_partition.push(RwLock::new(log_files));
+        }
+
+        log_files
+            .write()
+            .await
+            .insert(log_name.clone(), log_files_by_partition);
+
         let (commit_log, receivers) = CommitLog::new(log_name.clone(), partitions);
-        CommitLog::setup_receivers(receivers, commit_log.name.clone());
+        CommitLog::setup_receivers(receivers, commit_log.name.clone(), &log_files);
         logs.write().await.insert(log_name, commit_log);
     }
 }
