@@ -104,7 +104,7 @@ impl CommitLog {
     pub fn setup_receivers(
         receivers: Vec<Receiver<InternalMessage>>,
         log_name: String,
-        log_files: &LogFiles,
+        log_segments: &LogSegments,
     ) {
         let mut ids = Vec::new();
         for _ in 0..receivers.len() {
@@ -115,19 +115,21 @@ impl CommitLog {
         for receiver in receivers {
             let log_name = log_name.clone();
             let ids = ids.clone();
-            let log_files = log_files.clone();
+            let log_segments = log_segments.clone();
             tokio::spawn(async move {
                 let ids = ids.clone();
-                let log_files = log_files.clone();
+                let log_segments = log_segments.clone();
                 let log_receiver = CommitLogReceiver::new(log_name);
-                log_receiver.handle_receiver(ids, receiver, log_files).await;
+                log_receiver
+                    .handle_receiver(ids, receiver, log_segments)
+                    .await;
             });
         }
     }
 
     pub async fn fetch_message(
         &self,
-        log_files: LogFiles,
+        log_segments: LogSegments,
         partition: u8,
         group: String,
     ) -> Result<BytesMut, &str> {
@@ -135,21 +137,22 @@ impl CommitLog {
 
         let mut offset: usize = self.load_offset(partition, &group).await;
 
-        let log_file_name = self.find_log_file(log_files, offset, partition).await;
+        let log_segment_filename = self
+            .find_log_segment_for_offset(log_segments, offset, partition)
+            .await;
 
-        let mut log_file = File::open(log_file_name).await.unwrap();
+        let mut log_segment = File::open(log_segment_filename).await.unwrap();
         // First id starts as the first 8 bytes of the file.
         let mut id_start = 0;
-        // The id is the first 8 bytes followed by the message size,
-        // also 8 bytes, so the message size ends at the 16th
-        // position.
-        let mut message_size_end = 16;
-        let message: Entry = loop {
-            if let Err(e) = log_file.seek(io::SeekFrom::Start(id_start as u64)).await {
+        // The id is the first 8 bytes followed by the entry size,
+        // also 8 bytes, so the entry size ends at the 16th position.
+        let mut entry_size_end = 16;
+        let entry: Entry = loop {
+            if let Err(e) = log_segment.seek(io::SeekFrom::Start(id_start as u64)).await {
                 panic!("Unable to seek file at position {id_start} {e}")
             }
             let mut buf = vec![0; 16];
-            if let Err(e) = log_file.read_exact(&mut buf).await {
+            if let Err(e) = log_segment.read_exact(&mut buf).await {
                 match e.kind() {
                     io::ErrorKind::UnexpectedEof => {
                         return Err("No data left in the log to be read");
@@ -158,28 +161,28 @@ impl CommitLog {
                 }
             };
 
-            let message_id = &buf[0..8];
-            let message_id = usize::from_be_bytes(message_id.try_into().unwrap());
-            let message_size = &buf[8..16];
-            let message_size = usize::from_be_bytes(message_size.try_into().unwrap());
-            if message_id == offset {
-                if let Err(e) = log_file
-                    .seek(io::SeekFrom::Start(message_size_end as u64))
+            let entry_id = &buf[0..8];
+            let entry_id = usize::from_be_bytes(entry_id.try_into().unwrap());
+            let entry_size = &buf[8..16];
+            let entry_size = usize::from_be_bytes(entry_size.try_into().unwrap());
+            if entry_id == offset {
+                if let Err(e) = log_segment
+                    .seek(io::SeekFrom::Start(entry_size_end as u64))
                     .await
                 {
-                    panic!("Unable to seek file at position {message_size_end} {e}")
+                    panic!("Unable to seek file at position {entry_size_end} {e}")
                 }
-                let mut buf = vec![0; message_size];
-                if let Err(e) = log_file.read_exact(&mut buf).await {
-                    panic!("Unable to read log file at byte {message_size_end} {e}");
+                let mut buf = vec![0; entry_size];
+                if let Err(e) = log_segment.read_exact(&mut buf).await {
+                    panic!("Unable to read log file at byte {entry_size_end} {e}");
                 }
                 break match bincode::deserialize(&buf) {
                     Ok(entry) => entry,
-                    Err(e) => panic!("Unable to deserialize saved message on log {e}"),
+                    Err(e) => panic!("Unable to deserialize saved entry on log {e}"),
                 };
             } else {
-                id_start += 16 + message_size;
-                message_size_end += 16 + message_size;
+                id_start += 16 + entry_size;
+                entry_size_end += 16 + entry_size;
             }
         };
 
@@ -188,7 +191,7 @@ impl CommitLog {
         // client receives the message to update the offset.
         self.increment_and_save_offset(partition, &group, &mut offset)
             .await;
-        Ok(message.data.clone())
+        Ok(entry.data.clone())
     }
 
     async fn create_offset_files(&self, group: &String) -> Result<(), &str> {
@@ -216,8 +219,13 @@ impl CommitLog {
         Ok(())
     }
 
-    async fn find_log_file(&self, log_files: LogFiles, offset: usize, partition: u8) -> String {
-        find_log_file_by_id(&log_files, &self.rog_home, &self.name, offset, partition).await
+    async fn find_log_segment_for_offset(
+        &self,
+        log_segments: LogSegments,
+        offset: usize,
+        partition: u8,
+    ) -> String {
+        find_log_segment_by_id(&log_segments, &self.rog_home, &self.name, offset, partition).await
     }
 
     async fn load_offset(&self, partition: u8, group: &String) -> usize {
@@ -242,7 +250,7 @@ impl CommitLog {
         }
     }
 
-    async fn increment_and_save_offset(&self, partition: u8, group: &String, offset: &mut usize) {
+    async fn increment_and_save_offset(&self, partition: u8, group: &str, offset: &mut usize) {
         let offset_file_name =
             format!("{}/{}/{partition}/{group}.offset", self.rog_home, self.name);
         *offset += 1;
@@ -275,19 +283,17 @@ impl CommitLogReceiver {
         &self,
         ids: Arc<Vec<Mutex<usize>>>,
         mut receiver: Receiver<InternalMessage>,
-        log_files: LogFiles,
+        log_segments: LogSegments,
     ) {
         // TODO Micro-batching
         while let Some(internal_message) = receiver.recv().await {
             let partition = internal_message.partition;
             let id = self.load_most_recent_id(&ids, partition).await;
 
-            let log_file_name = self.find_log_file(&log_files, id, partition).await;
+            let segment_filename = self.find_log_segment(&log_segments, id, partition).await;
 
             let entry = Entry::new(internal_message);
-            let entry_in_storage_format = self.build_entry_in_storage_format(&entry, id);
-
-            self.save_log_to_file(log_file_name, entry_in_storage_format)
+            self.append_entry_to_segment(segment_filename, entry, id)
                 .await;
 
             self.save_id_file(id, partition).await;
@@ -343,9 +349,14 @@ impl CommitLogReceiver {
         storable_entry
     }
 
-    async fn find_log_file(&self, log_files: &LogFiles, id: usize, partition: u8) -> String {
+    async fn find_log_segment(
+        &self,
+        log_segments: &LogSegments,
+        id: usize,
+        partition: u8,
+    ) -> String {
         let log_file_name =
-            find_log_file_by_id(log_files, &self.rog_home, &self.name, id, partition).await;
+            find_log_segment_by_id(log_segments, &self.rog_home, &self.name, id, partition).await;
 
         let result = File::open(&log_file_name).await;
         let log_file = match result {
@@ -367,25 +378,29 @@ impl CommitLogReceiver {
                 Ok(_) => debug!("Created new log file for {id}"),
                 Err(e) => panic!("Unable to create new log file at {log_file_name} {e}"),
             }
-            let log_files = log_files.read().await;
-            let files = log_files.get(&self.name).unwrap();
-            files[partition as usize].write().await.push(id);
+            let log_segments = log_segments.read().await;
+            let segments = log_segments.get(&self.name).unwrap();
+            segments[partition as usize].write().await.push(id);
             log_file_name
         } else {
             log_file_name
         }
     }
 
-    async fn save_log_to_file(&self, log_file_name: String, parsed_message: Vec<u8>) {
-        let result = OpenOptions::new().append(true).open(&log_file_name).await;
+    async fn append_entry_to_segment(&self, segment_filename: String, entry: Entry, id: usize) {
+        let entry_in_storage_format = self.build_entry_in_storage_format(&entry, id);
+        let result = OpenOptions::new()
+            .append(true)
+            .open(&segment_filename)
+            .await;
         let mut log_file = match result {
             Ok(file) => file,
             Err(e) => {
-                panic!("Unable to open log file for appending {log_file_name} {e}");
+                panic!("Unable to open log file for appending {segment_filename} {e}");
             }
         };
-        if let Err(e) = log_file.write_all(&parsed_message).await {
-            panic!("Unable to write to log file {log_file_name} {e}");
+        if let Err(e) = log_file.write_all(&entry_in_storage_format).await {
+            panic!("Unable to write to log file {segment_filename} {e}");
         }
     }
 
@@ -404,30 +419,30 @@ impl CommitLogReceiver {
     }
 }
 
-async fn find_log_file_by_id(
-    log_files: &LogFiles,
+async fn find_log_segment_by_id(
+    log_segments: &LogSegments,
     rog_home: &String,
     name: &String,
     id: usize,
     partition: u8,
 ) -> String {
-    let log_files = &log_files.read().await;
-    let log_files = &log_files.get(name).unwrap()[partition as usize]
+    let log_segments = &log_segments.read().await;
+    let log_segments_by_partition = &log_segments.get(name).unwrap()[partition as usize]
         .read()
         .await;
-    match find_log_by_matching_id(log_files, id) {
+    match find_log_segment_by_matching_id(log_segments_by_partition, id) {
         Some(file_name) => format!("{}/{}/{partition}/{}.log", rog_home, name, file_name),
         None => format!(
             "{}/{}/{partition}/{}.log",
             rog_home,
             name,
-            log_files.last().unwrap()
+            log_segments_by_partition.last().unwrap()
         ),
     }
 }
 
-fn find_log_by_matching_id(log_files: &[usize], id: usize) -> Option<usize> {
-    for files in log_files.windows(2) {
+fn find_log_segment_by_matching_id(log_segments: &[usize], id: usize) -> Option<usize> {
+    for files in log_segments.windows(2) {
         if id >= files[0] && id < files[1] {
             return Some(files[0]);
         }
@@ -468,12 +483,12 @@ impl Entry {
 }
 
 pub type Logs = Arc<RwLock<HashMap<String, CommitLog>>>;
-pub type LogFiles = Arc<RwLock<HashMap<String, Vec<RwLock<Vec<usize>>>>>>;
+pub type LogSegments = Arc<RwLock<HashMap<String, Vec<RwLock<Vec<usize>>>>>>;
 
 /// Reads the created logs in rog home and loads them in memory. This
 /// function is used when rog starts up so that the clients can
 /// publish and fetch messages.
-pub async fn load_logs(logs: Logs, log_files: LogFiles) {
+pub async fn load_logs(logs: Logs, log_segments: LogSegments) {
     let rog_home = match env::var("ROG_HOME") {
         Ok(path) => path,
         Err(e) => panic!("ROG_HOME enrivonment variable not set {e}"),
@@ -504,9 +519,9 @@ pub async fn load_logs(logs: Logs, log_files: LogFiles) {
             "Loading log to memory",
         );
 
-        let mut log_files_by_partition = Vec::new();
+        let mut log_segments_by_partition = Vec::new();
         for partition in 0..partitions {
-            let mut log_files: Vec<usize> =
+            let mut log_segments: Vec<usize> =
                 std::fs::read_dir(format!("{}/{}/{partition}", rog_home, log_name))
                     .unwrap()
                     .filter_map(Result::ok)
@@ -523,17 +538,17 @@ pub async fn load_logs(logs: Logs, log_files: LogFiles) {
                             .unwrap()
                     })
                     .collect();
-            log_files.sort();
-            log_files_by_partition.push(RwLock::new(log_files));
+            log_segments.sort();
+            log_segments_by_partition.push(RwLock::new(log_segments));
         }
 
-        log_files
+        log_segments
             .write()
             .await
-            .insert(log_name.clone(), log_files_by_partition);
+            .insert(log_name.clone(), log_segments_by_partition);
 
         let (commit_log, receivers) = CommitLog::new(log_name.clone(), partitions);
-        CommitLog::setup_receivers(receivers, commit_log.name.clone(), &log_files);
+        CommitLog::setup_receivers(receivers, commit_log.name.clone(), &log_segments);
         logs.write().await.insert(log_name, commit_log);
     }
 }
