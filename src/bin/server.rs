@@ -85,6 +85,7 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs, log_segments: LogS
         cursor += bytes_read;
     }
 
+    // TODO Don't "reparse" the command here.
     let command = parse_command(&buf);
 
     let command = match command {
@@ -110,6 +111,11 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs, log_segments: LogS
             partition,
             group,
         } => fetch_log(logs, log_segments, log_name, partition, group).await,
+        Command::Ack {
+            partition,
+            log_name,
+            group,
+        } => ack_message(logs, log_name, partition, group).await,
         _ => {
             debug!("command not created yet");
             let message = "Command not created yet";
@@ -220,6 +226,19 @@ async fn fetch_log(
                 }
             };
             data.to_vec()
+        }
+        None => {
+            let message = format!("No log registered with name {log_name}");
+            build_error_response(&message)
+        }
+    }
+}
+
+async fn ack_message(logs: Logs, log_name: String, partition: u8, group: String) -> Vec<u8> {
+    match logs.read().await.get(&log_name) {
+        Some(log) => {
+            log.ack_message(partition, group).await;
+            (0_u8).to_be_bytes().to_vec()
         }
         None => {
             let message = format!("No log registered with name {log_name}");

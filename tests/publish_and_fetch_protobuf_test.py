@@ -2,7 +2,11 @@ from random import randint
 from time import sleep
 
 from addressbook_pb2 import Person
-from rog_client import RogClient, create_log_and_check_success
+from rog_client import (
+    RogClient,
+    ack_message_and_check_success,
+    create_log_and_check_success,
+)
 
 
 def build_person_object():
@@ -46,10 +50,13 @@ def test_send_one_protobuf_message():
     assert response_person.email == person.email
     assert response_person.phones == person.phones
 
+    ack_message_and_check_success(client, log_name, 0, "proto-group")
+
 
 def test_send_multiple_protobuf_messages_to_same_partition():
     client = RogClient()
     log_name = "multiple-proto-events.log"
+    partition = 2
 
     create_log_and_check_success(client, log_name, 10)
 
@@ -59,7 +66,7 @@ def test_send_multiple_protobuf_messages_to_same_partition():
         persons.append(person)
         data = person.SerializeToString()
         client.connect()
-        response = client.send_binary_message(log_name, 2, data)
+        response = client.send_binary_message(log_name, partition, data)
         expected_response = (0).to_bytes(1, byteorder="big")
         assert response == expected_response
 
@@ -67,7 +74,7 @@ def test_send_multiple_protobuf_messages_to_same_partition():
 
     for person in persons:
         client.connect()
-        response = client.fetch_log(log_name, 2, "proto-group")
+        response = client.fetch_log(log_name, partition, "proto-group")
 
         success_byte = (0).to_bytes(1, byteorder="big")
         assert response[0:1] == success_byte
@@ -79,3 +86,5 @@ def test_send_multiple_protobuf_messages_to_same_partition():
         assert response_person.name == person.name
         assert response_person.email == person.email
         assert response_person.phones == person.phones
+
+        ack_message_and_check_success(client, log_name, partition, "proto-group")

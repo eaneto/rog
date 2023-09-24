@@ -6,6 +6,7 @@ import psutil
 
 from rog_client import (
     RogClient,
+    ack_message_and_check_success,
     create_log_and_check_success,
     fetch_message_and_check_success,
     send_message_and_check_success,
@@ -37,5 +38,7 @@ def test_log_loading_after_server_restart(request):
     pid = initialize_rog_server(profile)
 
     fetch_message_and_check_success(client, log_name, 0, "test-group", message)
+
+    ack_message_and_check_success(client, log_name, 0, "test-group")
 
     kill_rog_server(pid)
