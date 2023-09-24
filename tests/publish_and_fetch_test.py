@@ -2,6 +2,7 @@ from time import sleep
 
 from rog_client import (
     RogClient,
+    ack_message_and_check_success,
     create_log_and_check_success,
     fetch_message_and_check_success,
     send_message_and_check_success,
@@ -23,6 +24,7 @@ def test_publish_one_message_to_each_partition():
         fetch_message_and_check_success(
             client, log_name, i, "test-group", expected_response
         )
+        ack_message_and_check_success(client, log_name, i, "test-group")
 
 
 def test_publishing_more_than_one_message_to_same_partitions():
@@ -39,6 +41,8 @@ def test_publishing_more_than_one_message_to_same_partitions():
     fetch_message_and_check_success(
         client, log_name, 0, "test-group", expected_response
     )
+
+    ack_message_and_check_success(client, log_name, 0, "test-group")
 
     expected_response = f"second message"
     fetch_message_and_check_success(
@@ -62,20 +66,28 @@ def test_fetching_data_from_same_partition_with_differente_groups():
         client, log_name, 0, "test-group-1", expected_response
     )
 
+    ack_message_and_check_success(client, log_name, 0, "test-group-1")
+
     expected_response = f"second message"
     fetch_message_and_check_success(
         client, log_name, 0, "test-group-1", expected_response
     )
+
+    ack_message_and_check_success(client, log_name, 0, "test-group-1")
 
     expected_response = f"first message"
     fetch_message_and_check_success(
         client, log_name, 0, "test-group-2", expected_response
     )
 
+    ack_message_and_check_success(client, log_name, 0, "test-group-2")
+
     expected_response = f"second message"
     fetch_message_and_check_success(
         client, log_name, 0, "test-group-2", expected_response
     )
+
+    ack_message_and_check_success(client, log_name, 0, "test-group-2")
 
 
 def test_fetch_data_from_a_log_with_no_data_left():
@@ -89,3 +101,32 @@ def test_fetch_data_from_a_log_with_no_data_left():
     message_size = int.from_bytes(response[1:9], "big")
     expected_message = "No data left in the log to be read"
     assert response[9 : (10 + message_size)].decode("utf-8") == expected_message
+
+
+def test_publishing_more_than_one_message_to_same_partitions_without_acks():
+    client = RogClient()
+    log_name = "multiple-messages-to-partition-without-acks.log"
+
+    create_log_and_check_success(client, log_name, 10)
+    send_message_and_check_success(client, log_name, 0, "first message")
+    send_message_and_check_success(client, log_name, 0, "second message")
+
+    sleep(0.1)
+
+    expected_response = f"first message"
+    fetch_message_and_check_success(
+        client, log_name, 0, "test-group", expected_response
+    )
+    fetch_message_and_check_success(
+        client, log_name, 0, "test-group", expected_response
+    )
+    fetch_message_and_check_success(
+        client, log_name, 0, "test-group", expected_response
+    )
+
+    ack_message_and_check_success(client, log_name, 0, "test-group")
+
+    expected_response = f"second message"
+    fetch_message_and_check_success(
+        client, log_name, 0, "test-group", expected_response
+    )

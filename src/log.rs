@@ -135,7 +135,7 @@ impl CommitLog {
     ) -> Result<BytesMut, &str> {
         self.create_offset_files(&group).await?;
 
-        let mut offset: usize = self.load_offset(partition, &group).await;
+        let offset: usize = self.load_offset(partition, &group).await;
 
         let log_segment_filename = self
             .find_log_segment_for_offset(log_segments, offset, partition)
@@ -186,12 +186,13 @@ impl CommitLog {
             }
         };
 
-        // TODO Offset file should only be updated if the response was
-        // sent successfully to the client, we have to make sure the
-        // client receives the message to update the offset.
+        Ok(entry.data)
+    }
+
+    pub async fn ack_message(&self, partition: u8, group: String) {
+        let mut offset: usize = self.load_offset(partition, &group).await;
         self.increment_and_save_offset(partition, &group, &mut offset)
             .await;
-        Ok(entry.data.clone())
     }
 
     async fn create_offset_files(&self, group: &String) -> Result<(), &str> {
