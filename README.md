@@ -67,7 +67,7 @@ the [integration tests](./tests/rog_client.py).
 
 #### Create log
 
-| Field         | type   | Description                               |
+| Field         | Type   | Description                               |
 |---------------|--------|-------------------------------------------|
 | Command byte  | u8     | Fixed value for the create log command, 0 |
 | partitions    | u8     | Number of partitions for the log          |
@@ -76,13 +76,13 @@ the [integration tests](./tests/rog_client.py).
 
 ##### Successful response
 
-| Field        | type | Description                                        |
+| Field        | Type | Description                                        |
 |--------------|------|----------------------------------------------------|
 | Success byte | u8   | Indicates if the response was successful or not, 0 |
 
 #### Publish
 
-| Field         | type   | Description                            |
+| Field         | Type   | Description                            |
 |---------------|--------|----------------------------------------|
 | Command byte  | u8     | Fixed value for the publish command, 1 |
 | partition     | u8     | Partitions to publish the message      |
@@ -93,38 +93,75 @@ the [integration tests](./tests/rog_client.py).
 
 ##### Successful response
 
-| Field        | type | Description                                        |
+| Field        | Type | Description                                        |
 |--------------|------|----------------------------------------------------|
 | Success byte | u8   | Indicates if the response was successful or not, 0 |
 
 #### Fetch
 
-| Field         | type   | Description                                 |
-|---------------|--------|---------------------------------------------|
-| Command byte  | u8     | Fixed value for the fetch command, 2        |
-| partition     | u8     | Partition to fetch the message              |
-| Log name size | u8     | Size of the log name in bytes               |
-| Log name      | String | Log name                                    |
-| Data size     | u64    | Size of the content of the message in bytes |
-| Data          | bytes  | The actual content of the message           |
+| Field         | Type   | Description                          |
+|---------------|--------|--------------------------------------|
+| Command byte  | u8     | Fixed value for the fetch command, 2 |
+| partition     | u8     | Partition to fetch the message       |
+| Log name size | u8     | Size of the log name in bytes        |
+| Log name      | String | Log name                             |
+| Group size    | u64    | Size of the group name               |
+| Group         | bytes  | The group name                       |
 
 ##### Successful response
 
-| Field        | type   | Description                                        |
+| Field        | Type   | Description                                        |
 |--------------|--------|----------------------------------------------------|
 | Success byte | u8     | Indicates if the response was successful or not, 0 |
 | Message size | u64    | Size of the message content                        |
 | Message      | String | Actual message                                     |
 
+#### Ack
+
+| Field         | Type   | Description                        |
+|---------------|--------|------------------------------------|
+| Command byte  | u8     | Fixed value for the ack command, 3 |
+| partition     | u8     | Partition to fetch the message     |
+| Log name size | u8     | Size of the log name in bytes      |
+| Log name      | String | Log name                           |
+| Group size    | u64    | Size of the group name             |
+| Group         | bytes  | The group name                     |
+
+##### Successful response
+
+| Field        | Type   | Description                                        |
+|--------------|--------|----------------------------------------------------|
+| Success byte | u8     | Indicates if the response was successful or not, 0 |
+
 #### Error response
 
 All commands have the same possible error response.
 
-| Field        | type   | Description                                        |
+| Field        | Type   | Description                                        |
 |--------------|--------|----------------------------------------------------|
 | Success byte | u8     | Indicates if the response was successful or not, 1 |
 | Message size | u64    | Size of the error message                          |
 | Message      | String | Detailed error message                             |
+
+## Storage
+
+Rog keeps the messages stored in multiple log files, each file has an
+approximate max size of 1MiB. When a log is created, Rog creates a
+directory with name log name and one directory for each partition, the
+log files are kept inside the partition directory with the extension
+`.log`.
+
+### Log file format
+
+The file follows a simple structure so that it is easily seekeable so
+that the fetching process doesn't need to load the whole file into
+memory. Each message is stored as an "entry" on the file.
+
+| Field      | Size             | Description                            |
+|------------|------------------|----------------------------------------|
+| id         | 8 bytes          | The message id                         |
+| entry size | 8 bytes          | The size of the entry content in bytes |
+| entry      | entry size bytes | The entry content                      |
 
 [0]: https://kafka.apache.org/
 [1]: https://docs.pytest.org/en/7.4.x/
