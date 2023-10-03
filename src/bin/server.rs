@@ -29,8 +29,6 @@ async fn main() {
     let args = Args::parse();
     info!(port = args.port, "Running rog");
 
-    // TODO Distribute writes to multiple nodes
-
     let listener = match TcpListener::bind(format!("127.0.0.1:{}", args.port)).await {
         Ok(listener) => listener,
         Err(_) => panic!("Unable to start rog server on port {}", args.port),

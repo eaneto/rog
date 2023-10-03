@@ -2,10 +2,6 @@
 
 A simple distributed commit log inspired by [Kafka][0].
 
-## TODOs
-
-- Distribute writes to multiple nodes
-
 ## Building
 
 To build both the cli and the server you can just run `cargo build
