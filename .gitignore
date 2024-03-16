@@ -21,3 +21,5 @@ Cargo.lock
 **/__pycache__/**
 
 tests/*_pb2.py
+
+mutants.out*
