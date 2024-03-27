@@ -4,6 +4,7 @@ const CREATE_LOG_COMMAND_BYTE: u8 = 0;
 const PUBLISH_COMMAND_BYTE: u8 = 1;
 const FETCH_COMMAND_BYTE: u8 = 2;
 const ACK_COMMAND_BYTE: u8 = 3;
+const REQUEST_VOTE_COMMAND_BYTE: u8 = 4;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
