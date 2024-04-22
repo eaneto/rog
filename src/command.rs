@@ -1,10 +1,14 @@
 use bytes::{BufMut, BytesMut};
 
+use crate::raft;
+use bincode;
+
 const CREATE_LOG_COMMAND_BYTE: u8 = 0;
 const PUBLISH_COMMAND_BYTE: u8 = 1;
 const FETCH_COMMAND_BYTE: u8 = 2;
 const ACK_COMMAND_BYTE: u8 = 3;
 const REQUEST_VOTE_COMMAND_BYTE: u8 = 4;
+const LOG_REQUEST_COMMAND_BYTE: u8 = 5;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -27,6 +31,20 @@ pub enum Command {
         log_name: String,
         group: String,
     },
+    RequestVote {
+        node_id: u64,
+        current_term: u64,
+        log_length: u64,
+        last_term: u64,
+    },
+    LogRequest {
+        leader_id: u64,
+        term: u64,
+        prefix_length: usize,
+        prefix_term: u64,
+        leader_commit: u64,
+        suffix: Vec<raft::LogEntry>,
+    },
     Unknown,
 }
 
@@ -41,6 +59,7 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, &str> {
         PUBLISH_COMMAND_BYTE => parse_publish_log_command(buf),
         FETCH_COMMAND_BYTE => parse_fetch_log_command(buf),
         ACK_COMMAND_BYTE => parse_ack_command(buf),
+        REQUEST_VOTE_COMMAND_BYTE => parse_request_vote_command(buf),
         _ => Ok(Command::Unknown),
     }
 }
@@ -203,6 +222,26 @@ fn parse_ack_command(buf: &[u8]) -> Result<Command, &str> {
         partition,
         group: group.to_string(),
     })
+}
+
+fn parse_request_vote_command(buf: &[u8]) -> Result<Command, &str> {
+    let length = match buf.get(1..9) {
+        Some(length) => length,
+        None => {
+            return Err("Unparseable command, unable to parse length");
+        }
+    };
+
+    let length = usize::from_be_bytes(length.try_into().unwrap());
+    let vote_request_buffer = buf.get(9..(9 + length)).unwrap();
+    let vote_request: raft::VoteRequest = bincode::deserialize(vote_request_buffer).unwrap();
+
+    return Ok(Command::RequestVote {
+        node_id: vote_request.node_id,
+        current_term: vote_request.current_term,
+        log_length: vote_request.log_length,
+        last_term: vote_request.last_term,
+    });
 }
 
 #[cfg(test)]

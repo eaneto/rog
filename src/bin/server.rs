@@ -5,14 +5,17 @@ use clap::Parser;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    sync::{Mutex, RwLock},
 };
 use tracing::{debug, error, info, trace, warn};
 
-use rog::log::{load_logs, CommitLog, InternalMessage, Logs};
 use rog::{
     command::{parse_command, Command},
     log::LogSegments,
+};
+use rog::{
+    log::{load_logs, CommitLog, InternalMessage, Logs},
+    raft,
 };
 
 #[derive(Parser, Debug)]
@@ -20,6 +23,9 @@ struct Args {
     /// Port to run the server
     #[arg(short, long, default_value_t = 7878)]
     port: u16,
+    /// Server's unique id
+    #[arg(short, long, default_value_t = 1)]
+    id: u64,
 }
 
 #[tokio::main]
@@ -38,17 +44,29 @@ async fn main() {
     let log_segments = Arc::new(RwLock::new(HashMap::new()));
     load_logs(logs.clone(), log_segments.clone()).await;
 
-    handle_connections(listener, logs, log_segments).await;
+    let server = Arc::new(Mutex::new(raft::Server::new(args.id)));
+    // If a new node is up it immediately tries to become the leader,
+    // if there's already a leader in the cluster it will receive
+    // other node's response and become a follower.
+    server.lock().await.start_election().await;
+
+    handle_connections(server, listener, logs, log_segments).await;
 }
 
-async fn handle_connections(listener: TcpListener, logs: Logs, log_segments: LogSegments) {
+async fn handle_connections(
+    server: Arc<Mutex<raft::Server>>,
+    listener: TcpListener,
+    logs: Logs,
+    log_segments: LogSegments,
+) {
     loop {
+        let server = server.clone();
         let logs = logs.clone();
         let log_segments = log_segments.clone();
         match listener.accept().await {
             Ok((stream, _)) => {
                 tokio::spawn(async move {
-                    handle_connection(stream, logs, log_segments).await;
+                    handle_connection(server, stream, logs, log_segments).await;
                 });
             }
             Err(e) => warn!("Error listening o socket {e}"),
@@ -56,7 +74,12 @@ async fn handle_connections(listener: TcpListener, logs: Logs, log_segments: Log
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, logs: Logs, log_segments: LogSegments) {
+async fn handle_connection(
+    server: Arc<Mutex<raft::Server>>,
+    mut stream: TcpStream,
+    logs: Logs,
+    log_segments: LogSegments,
+) {
     let mut cursor = 0;
     let mut buf = vec![0u8; 4096];
     loop {
@@ -114,6 +137,12 @@ async fn handle_connection(mut stream: TcpStream, logs: Logs, log_segments: LogS
             log_name,
             group,
         } => ack_message(logs, log_name, partition, group).await,
+        Command::RequestVote {
+            node_id,
+            current_term,
+            log_length,
+            last_term,
+        } => request_vote(server, node_id, current_term, log_length, last_term).await,
         _ => {
             debug!("command not created yet");
             let message = "Command not created yet";
@@ -243,6 +272,29 @@ async fn ack_message(logs: Logs, log_name: String, partition: u8, group: String)
             build_error_response(&message)
         }
     }
+}
+
+async fn request_vote(
+    server: Arc<Mutex<raft::Server>>,
+    node_id: u64,
+    current_term: u64,
+    log_length: u64,
+    last_term: u64,
+) -> Vec<u8> {
+    let vote_request = raft::VoteRequest {
+        node_id,
+        current_term,
+        log_length,
+        last_term,
+    };
+    let vote_response = server.lock().await.receive_vote(vote_request).await;
+    let encoded_vote_response = bincode::serialize(&vote_response).unwrap();
+
+    let mut buf = Vec::new();
+    buf.extend((0_u8).to_be_bytes());
+    buf.extend(encoded_vote_response.len().to_be_bytes());
+    buf.extend(encoded_vote_response);
+    buf
 }
 
 /// Builds the standard error response, the first byte is always an u8
