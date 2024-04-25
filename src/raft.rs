@@ -3,6 +3,8 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use tracing::{error, trace};
+
 use bytes::BytesMut;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -57,14 +59,14 @@ pub struct Server {
     nodes: HashMap<u64, Node>,
 }
 
-#[derive(Clone)]
-struct Node {
-    id: u64,
-    address: String,
+#[derive(Clone, Debug)]
+pub struct Node {
+    pub id: u64,
+    pub address: String,
 }
 
 impl Server {
-    pub fn new(id: u64) -> Server {
+    pub fn new(id: u64, nodes: HashMap<u64, Node>) -> Server {
         Server {
             id,
             current_term: 0,
@@ -77,11 +79,13 @@ impl Server {
             votes_received: HashSet::new(),
             sent_length: HashMap::new(),
             acked_length: HashMap::new(),
-            nodes: HashMap::new(),
+            nodes,
         }
     }
 
-    // Leader election
+    pub fn election_timeout(&self) -> u16 {
+        self.election_timeout
+    }
 
     pub async fn start_election(&mut self) {
         self.current_term += 1;
@@ -97,15 +101,21 @@ impl Server {
             last_term,
         };
 
-        // TODO: Send VoteRequest to other nodes
         let nodes = self.nodes.clone();
         for (_, node) in nodes.into_iter() {
-            let response = self.send_vote_request(&vote_request, &node).await;
-            self.process_vote_response(response).await;
+            // TODO Send requests in parallel.
+            // TODO Treat error
+            if let Ok(response) = self.send_vote_request(&vote_request, &node).await {
+                self.process_vote_response(response).await;
+            }
         }
     }
 
-    async fn send_vote_request(&self, vote_request: &VoteRequest, node: &Node) -> VoteResponse {
+    async fn send_vote_request(
+        &self,
+        vote_request: &VoteRequest,
+        node: &Node,
+    ) -> Result<VoteResponse, &str> {
         let command_byte = 4_u8.to_be_bytes();
         let encoded_request = bincode::serialize(vote_request).unwrap();
         let mut buf = Vec::new();
@@ -113,16 +123,43 @@ impl Server {
         buf.extend(encoded_request.len().to_be_bytes());
         buf.extend(encoded_request);
 
-        let mut stream = TcpStream::connect(&node.address).await.unwrap();
-        stream.write_all(&buf).await.unwrap();
+        // TODO: Retry
+        let mut stream = match TcpStream::connect(&node.address).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                error!("Can't connect to node at {}", &node.address);
+                return Err("Can't connect to node");
+            }
+        };
+
+        // What should be done in case of failure?
+        match stream.write_all(&buf).await {
+            Ok(()) => {
+                trace!("Successfully sent request to node {}", &node.id)
+            }
+            Err(_) => {
+                error!("Unable to send request to node {}", &node.id);
+                return Err("Unable to send request to node");
+            }
+        };
         let mut buf = [0; 1024];
-        stream.read(&mut buf).await.unwrap();
+        match stream.read(&mut buf).await {
+            Ok(_) => (),
+            Err(_) => {
+                error!("Can't read response from client {}", &node.id);
+                return Err("Can't read response from client");
+            }
+        };
         if buf[0] == 0 {
             let length = buf.get(1..9).unwrap();
             let length = usize::from_be_bytes(length.try_into().unwrap());
-            return bincode::deserialize(buf.get(9..(9 + length)).unwrap()).unwrap();
+            let encoded_response = match buf.get(9..(9 + length)) {
+                Some(response) => response,
+                None => return Err("Incomplete response, unable to parse vote response"),
+            };
+            Ok(bincode::deserialize(encoded_response).unwrap())
         } else {
-            panic!("Error");
+            Err("Response is not successful")
         }
     }
 

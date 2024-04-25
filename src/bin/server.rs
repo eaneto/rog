@@ -1,7 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bytes::{BufMut, BytesMut};
 use clap::Parser;
+use clokwerk::{AsyncScheduler, TimeUnits};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -26,6 +27,12 @@ struct Args {
     /// Server's unique id
     #[arg(short, long, default_value_t = 1)]
     id: u64,
+    /// List of node ids
+    #[arg(long)]
+    node_ids: Vec<u64>,
+    /// List of node addresses
+    #[arg(long)]
+    node_addresses: Vec<String>,
 }
 
 #[tokio::main]
@@ -44,11 +51,43 @@ async fn main() {
     let log_segments = Arc::new(RwLock::new(HashMap::new()));
     load_logs(logs.clone(), log_segments.clone()).await;
 
-    let server = Arc::new(Mutex::new(raft::Server::new(args.id)));
+    let mut nodes = HashMap::new();
+    for i in 0..(args.node_ids.len()) {
+        let node_id = args.node_ids.get(i).unwrap();
+        let node_address = args.node_addresses.get(i).unwrap();
+        let node = raft::Node {
+            id: *node_id,
+            address: node_address.clone(),
+        };
+        nodes.insert(*node_id, node);
+    }
+
+    println!("{:?}", nodes);
+    let server = Arc::new(Mutex::new(raft::Server::new(args.id, nodes)));
     // If a new node is up it immediately tries to become the leader,
     // if there's already a leader in the cluster it will receive
     // other node's response and become a follower.
     server.lock().await.start_election().await;
+
+    // TODO: Health job
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            //server.lock().await.
+        }
+    });
+
+    // TODO: Election timeout
+    // TODO: Election job
+    let election_timeout = server.lock().await.election_timeout();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(election_timeout as u64)).await;
+            // TODO Check if election is needed.
+            // If heartbeats not received, then:
+            trace!("Start new election");
+        }
+    });
 
     handle_connections(server, listener, logs, log_segments).await;
 }

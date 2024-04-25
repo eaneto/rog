@@ -1,6 +1,6 @@
 use std::{
-    collections::HashMap, env, ffi::OsStr, os::unix::fs::OpenOptionsExt,
-    os::unix::prelude::OsStrExt, path::Path, sync::Arc, time::SystemTime,
+    collections::HashMap, env, ffi::OsStr, os::unix::prelude::OsStrExt, path::Path, sync::Arc,
+    time::SystemTime,
 };
 
 use bytes::BytesMut;
@@ -392,7 +392,6 @@ impl CommitLogReceiver {
         let entry_in_storage_format = self.build_entry_in_storage_format(&entry, id);
         let result = OpenOptions::new()
             .append(true)
-            .custom_flags(libc::O_DIRECT)
             .open(&segment_filename)
             .await;
         let mut log_file = match result {
