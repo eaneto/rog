@@ -44,6 +44,7 @@ pub struct Server {
     // Need to be stored on disk
     current_term: u64,
     voted_for: Option<u64>,
+    // TODO: Maybe this could be a skiplist
     log: Vec<LogEntry>,
     // Can be stored in-memory
     state: State,
@@ -230,23 +231,31 @@ impl Server {
 
     // Log replication
 
-    async fn broadcast_message(&mut self, message: BytesMut) {
+    pub async fn broadcast_message(&mut self, message: BytesMut) {
         if matches!(self.state, State::Leader) {
             self.log.push(LogEntry {
                 term: self.current_term,
                 message,
             });
             self.acked_length.insert(self.id, self.current_term);
-            for (_, node) in &self.nodes {
-                self.replicate_log(node).await;
-            }
+            self.broadcast_current_log().await;
         } else {
             unimplemented!("Leader forwarding not implemented yet")
         }
     }
 
+    pub async fn broadcast_current_log(&mut self) {
+        if matches!(self.state, State::Leader) {
+            for (_, node) in &self.nodes.clone() {
+                if let Ok(response) = self.replicate_log(node).await {
+                    self.process_log_response(response).await;
+                }
+            }
+        }
+    }
+
     // Can only be called by the leader
-    async fn replicate_log(&self, node: &Node) {
+    async fn replicate_log(&self, node: &Node) -> Result<LogResponse, &str> {
         let prefix_length = self.sent_length.get(&node.id).unwrap().clone() as usize;
         let suffix = &self.log[prefix_length..];
         let prefix_term = if prefix_length > 0 {
@@ -262,44 +271,63 @@ impl Server {
             leader_commit: self.commit_length,
             suffix: suffix.to_vec(),
         };
-        // TODO: Send request
+
+        self.send_log_request(&node, &request).await
     }
 
-    async fn _receive_log_request(&mut self, log_request: LogRequest) {
-        if log_request.term > self.current_term {
-            self.current_term = log_request.term;
-            self.voted_for = None;
-            // TODO: Cancel election timer
-            return;
-        }
-        if log_request.term == self.current_term {
-            self.state = State::Follower;
-            self.current_leader = log_request.leader_id;
-        }
+    async fn send_log_request(
+        &self,
+        node: &Node,
+        log_request: &LogRequest,
+    ) -> Result<LogResponse, &str> {
+        let command_byte = 5_u8.to_be_bytes();
+        let encoded_request = bincode::serialize(log_request).unwrap();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(encoded_request.len().to_be_bytes());
+        buf.extend(encoded_request);
 
-        let ok = (self.log.len() >= log_request.prefix_length)
-            && (log_request.prefix_length == 0
-                || self.log[log_request.prefix_length - 1].term == log_request.prefix_term);
-        if log_request.term == self.current_term && ok {
-            let ack = log_request.prefix_length + log_request.suffix.len();
-            self.send_append_entries(log_request).await;
-            let response = LogResponse {
-                node_id: self.id,
-                term: self.current_term,
-                ack: ack as u64,
-                successful: true,
+        // TODO: Retry
+        let mut stream = match TcpStream::connect(&node.address).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                error!("Can't connect to node at {}", &node.address);
+                return Err("Can't connect to node");
+            }
+        };
+
+        // What should be done in case of failure?
+        match stream.write_all(&buf).await {
+            Ok(()) => {
+                trace!("Successfully sent request to node {}", &node.id)
+            }
+            Err(_) => {
+                error!("Unable to send request to node {}", &node.id);
+                return Err("Unable to send request to node");
+            }
+        };
+        let mut buf = [0; 1024];
+        match stream.read(&mut buf).await {
+            Ok(_) => (),
+            Err(_) => {
+                error!("Can't read response from client {}", &node.id);
+                return Err("Can't read response from client");
+            }
+        };
+        if buf[0] == 0 {
+            let length = buf.get(1..9).unwrap();
+            let length = usize::from_be_bytes(length.try_into().unwrap());
+            let encoded_response = match buf.get(9..(9 + length)) {
+                Some(response) => response,
+                None => return Err("Incomplete response, unable to parse log response"),
             };
+            Ok(bincode::deserialize(encoded_response).unwrap())
         } else {
-            let response = LogResponse {
-                node_id: self.id,
-                term: self.current_term,
-                ack: 0,
-                successful: false,
-            };
+            Err("Response is not successful")
         }
     }
 
-    async fn _receive_log_response(&mut self, log_response: LogResponse) {
+    async fn process_log_response(&mut self, log_response: LogResponse) {
         if log_response.term > self.current_term {
             self.current_term = log_response.term;
             self.state = State::Follower;
@@ -323,7 +351,41 @@ impl Server {
                     self.sent_length.get(&log_response.node_id).unwrap() - 1,
                 );
                 let node = self.nodes.get(&log_response.node_id).unwrap();
+                // TODO: ?
                 self.replicate_log(node).await;
+            }
+        }
+    }
+
+    pub async fn receive_log_request(&mut self, log_request: LogRequest) -> LogResponse {
+        if log_request.term > self.current_term {
+            self.current_term = log_request.term;
+            self.voted_for = None;
+            // TODO: Cancel election timer
+        }
+        if log_request.term == self.current_term {
+            self.state = State::Follower;
+            self.current_leader = log_request.leader_id;
+        }
+
+        let ok = (self.log.len() >= log_request.prefix_length)
+            && (log_request.prefix_length == 0
+                || self.log[log_request.prefix_length - 1].term == log_request.prefix_term);
+        if log_request.term == self.current_term && ok {
+            let ack = log_request.prefix_length + log_request.suffix.len();
+            self.send_append_entries(log_request).await;
+            LogResponse {
+                node_id: self.id,
+                term: self.current_term,
+                ack: ack as u64,
+                successful: true,
+            }
+        } else {
+            LogResponse {
+                node_id: self.id,
+                term: self.current_term,
+                ack: 0,
+                successful: false,
             }
         }
     }
@@ -402,12 +464,12 @@ pub struct LogEntry {
 // RPC append entries
 #[derive(Serialize, Deserialize)]
 pub struct LogRequest {
-    leader_id: u64,
-    term: u64,
-    prefix_length: usize,
-    prefix_term: u64,
-    leader_commit: u64,
-    suffix: Vec<LogEntry>,
+    pub leader_id: u64,
+    pub term: u64,
+    pub prefix_length: usize,
+    pub prefix_term: u64,
+    pub leader_commit: u64,
+    pub suffix: Vec<LogEntry>,
 }
 
 #[derive(Serialize, Deserialize)]

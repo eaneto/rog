@@ -2,7 +2,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bytes::{BufMut, BytesMut};
 use clap::Parser;
-use clokwerk::{AsyncScheduler, TimeUnits};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -69,11 +68,12 @@ async fn main() {
     // other node's response and become a follower.
     server.lock().await.start_election().await;
 
-    // TODO: Health job
+    // TODO: Broadcast job
+    let server_clone = server.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            //server.lock().await.
+            server_clone.lock().await.broadcast_current_log().await;
         }
     });
 
@@ -182,6 +182,25 @@ async fn handle_connection(
             log_length,
             last_term,
         } => request_vote(server, node_id, current_term, log_length, last_term).await,
+        Command::LogRequest {
+            leader_id,
+            term,
+            prefix_length,
+            prefix_term,
+            leader_commit,
+            suffix,
+        } => {
+            log_request(
+                server,
+                leader_id,
+                term,
+                prefix_length,
+                prefix_term,
+                leader_commit,
+                suffix,
+            )
+            .await
+        }
         _ => {
             debug!("command not created yet");
             let message = "Command not created yet";
@@ -333,6 +352,33 @@ async fn request_vote(
     buf.extend((0_u8).to_be_bytes());
     buf.extend(encoded_vote_response.len().to_be_bytes());
     buf.extend(encoded_vote_response);
+    buf
+}
+
+async fn log_request(
+    server: Arc<Mutex<raft::Server>>,
+    leader_id: u64,
+    term: u64,
+    prefix_length: usize,
+    prefix_term: u64,
+    leader_commit: u64,
+    suffix: Vec<raft::LogEntry>,
+) -> Vec<u8> {
+    let log_request = raft::LogRequest {
+        leader_id,
+        term,
+        prefix_length,
+        prefix_term,
+        leader_commit,
+        suffix,
+    };
+    let log_response = server.lock().await.receive_log_request(log_request).await;
+    let encoded_log_response = bincode::serialize(&log_response).unwrap();
+
+    let mut buf = Vec::new();
+    buf.extend((0_u8).to_be_bytes());
+    buf.extend(encoded_log_response.len().to_be_bytes());
+    buf.extend(encoded_log_response);
     buf
 }
 

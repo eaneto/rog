@@ -60,6 +60,7 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, &str> {
         FETCH_COMMAND_BYTE => parse_fetch_log_command(buf),
         ACK_COMMAND_BYTE => parse_ack_command(buf),
         REQUEST_VOTE_COMMAND_BYTE => parse_request_vote_command(buf),
+        LOG_REQUEST_COMMAND_BYTE => parse_log_request_command(buf),
         _ => Ok(Command::Unknown),
     }
 }
@@ -241,6 +242,28 @@ fn parse_request_vote_command(buf: &[u8]) -> Result<Command, &str> {
         current_term: vote_request.current_term,
         log_length: vote_request.log_length,
         last_term: vote_request.last_term,
+    });
+}
+
+fn parse_log_request_command(buf: &[u8]) -> Result<Command, &str> {
+    let length = match buf.get(1..9) {
+        Some(length) => length,
+        None => {
+            return Err("Unparseable command, unable to parse length");
+        }
+    };
+
+    let length = usize::from_be_bytes(length.try_into().unwrap());
+    let log_request_buffer = buf.get(9..(9 + length)).unwrap();
+    let log_request: raft::LogRequest = bincode::deserialize(log_request_buffer).unwrap();
+
+    return Ok(Command::LogRequest {
+        leader_id: log_request.leader_id,
+        term: log_request.term,
+        prefix_length: log_request.prefix_length,
+        prefix_term: log_request.prefix_term,
+        leader_commit: log_request.leader_commit,
+        suffix: log_request.suffix,
     });
 }
 
