@@ -256,7 +256,11 @@ impl Server {
 
     // Can only be called by the leader
     async fn replicate_log(&self, node: &Node) -> Result<LogResponse, &str> {
-        let prefix_length = self.sent_length.get(&node.id).unwrap().clone() as usize;
+        // TODO: Should just insert 0?
+        let prefix_length = match self.sent_length.get(&node.id) {
+            Some(length) => *length as usize,
+            None => return Err("No logs sent yet"),
+        };
         let suffix = &self.log[prefix_length..];
         let prefix_term = if prefix_length > 0 {
             self.log[prefix_length - 1].term
@@ -344,7 +348,7 @@ impl Server {
                     .insert(log_response.node_id, log_response.ack);
                 self.acked_length
                     .insert(log_response.node_id, log_response.ack);
-                self._commit_log_entries().await;
+                self.commit_log_entries().await;
             } else if *self.sent_length.get(&log_response.node_id).unwrap() > 0 {
                 self.sent_length.insert(
                     log_response.node_id,
@@ -390,7 +394,7 @@ impl Server {
         }
     }
 
-    async fn _commit_log_entries(&mut self) {
+    async fn commit_log_entries(&mut self) {
         while self.commit_length < self.log.len() as u64 {
             let mut acks = 0;
             for (_, node) in &self.nodes {
