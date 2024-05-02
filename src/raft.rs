@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 
 use bytes::BytesMut;
 use rand::Rng;
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    time,
 };
 
 /// The cluster must have at least 5 servers.
@@ -58,6 +59,7 @@ pub struct Server {
     // match_index
     acked_length: HashMap<u64, u64>,
     nodes: HashMap<u64, Node>,
+    pub last_heartbeat: Option<time::Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +83,7 @@ impl Server {
             sent_length: HashMap::new(),
             acked_length: HashMap::new(),
             nodes,
+            last_heartbeat: None,
         }
     }
 
@@ -158,7 +161,11 @@ impl Server {
                 Some(response) => response,
                 None => return Err("Incomplete response, unable to parse vote response"),
             };
-            Ok(bincode::deserialize(encoded_response).unwrap())
+            let response = match bincode::deserialize(encoded_response) {
+                Ok(response) => response,
+                Err(_) => return Err("Unable to deserialize server response"),
+            };
+            Ok(response)
         } else {
             Err("Response is not successful")
         }
@@ -183,7 +190,7 @@ impl Server {
                     for (_, node) in &self.nodes {
                         self.sent_length.insert(node.id, self.log.len() as u64);
                         self.acked_length.insert(node.id, 0);
-                        self.replicate_log(node).await;
+                        self.replicate_log(node).await.unwrap();
                     }
                 }
             }
@@ -246,6 +253,7 @@ impl Server {
 
     pub async fn broadcast_current_log(&mut self) {
         if matches!(self.state, State::Leader) {
+            debug!("Starting log broadcast");
             for (_, node) in &self.nodes.clone() {
                 if let Ok(response) = self.replicate_log(node).await {
                     self.process_log_response(response).await;
@@ -256,29 +264,43 @@ impl Server {
 
     // Can only be called by the leader
     async fn replicate_log(&self, node: &Node) -> Result<LogResponse, &str> {
-        // TODO: Should just insert 0?
-        let prefix_length = match self.sent_length.get(&node.id) {
-            Some(length) => *length as usize,
-            None => return Err("No logs sent yet"),
-        };
-        let suffix = &self.log[prefix_length..];
-        let prefix_term = if prefix_length > 0 {
-            self.log[prefix_length - 1].term
-        } else {
-            0
-        };
-        let request = LogRequest {
-            leader_id: self.id,
-            term: self.current_term,
-            prefix_length,
-            prefix_term,
-            leader_commit: self.commit_length,
-            suffix: suffix.to_vec(),
+        let request = match self.sent_length.get(&node.id) {
+            Some(length) => {
+                let prefix_length = *length as usize;
+                let suffix = &self.log[prefix_length..];
+                let prefix_term = if prefix_length > 0 {
+                    self.log[prefix_length - 1].term
+                } else {
+                    0
+                };
+                LogRequest {
+                    leader_id: self.id,
+                    term: self.current_term,
+                    prefix_length,
+                    prefix_term,
+                    leader_commit: self.commit_length,
+                    suffix: suffix.to_vec(),
+                }
+            }
+            // If there are logs sent just send an empty vector as a
+            // heartbeat.
+            None => {
+                debug!("Sending heartbeat to replicas");
+                LogRequest {
+                    leader_id: self.id,
+                    term: self.current_term,
+                    prefix_length: 0,
+                    prefix_term: 0,
+                    leader_commit: self.commit_length,
+                    suffix: Vec::new(),
+                }
+            }
         };
 
         self.send_log_request(&node, &request).await
     }
 
+    // TODO: Handle errors betters, create different error types.
     async fn send_log_request(
         &self,
         node: &Node,
@@ -323,10 +345,28 @@ impl Server {
             let length = usize::from_be_bytes(length.try_into().unwrap());
             let encoded_response = match buf.get(9..(9 + length)) {
                 Some(response) => response,
-                None => return Err("Incomplete response, unable to parse log response"),
+                None => {
+                    error!(
+                        "Incomplete response, unable to parse log response from client {}",
+                        &node.id
+                    );
+                    return Err("Incomplete response, unable to parse log response");
+                }
             };
-            Ok(bincode::deserialize(encoded_response).unwrap())
+            let response = match bincode::deserialize(encoded_response) {
+                Ok(response) => response,
+                Err(_) => {
+                    error!(
+                        "Unable to deserialize server response from client {}",
+                        &node.id
+                    );
+                    return Err("Unable to deserialize server response");
+                }
+            };
+            debug!("Received successful response from {}", &node.id);
+            Ok(response)
         } else {
+            debug!("Received failed response from {}", &node.id);
             Err("Response is not successful")
         }
     }
@@ -367,6 +407,8 @@ impl Server {
             self.voted_for = None;
             // TODO: Cancel election timer
         }
+        // TODO: Is this the correct condition? Should the state be
+        // modified every single time?
         if log_request.term == self.current_term {
             self.state = State::Follower;
             self.current_leader = log_request.leader_id;
@@ -378,19 +420,23 @@ impl Server {
         if log_request.term == self.current_term && ok {
             let ack = log_request.prefix_length + log_request.suffix.len();
             self.send_append_entries(log_request).await;
-            LogResponse {
+            let response = LogResponse {
                 node_id: self.id,
                 term: self.current_term,
                 ack: ack as u64,
                 successful: true,
-            }
+            };
+            debug!("Sending log response {:?}", response);
+            response
         } else {
-            LogResponse {
+            let response = LogResponse {
                 node_id: self.id,
                 term: self.current_term,
                 ack: 0,
                 successful: false,
-            }
+            };
+            debug!("Sending log response {:?}", response);
+            response
         }
     }
 
@@ -444,7 +490,7 @@ impl Server {
 }
 
 // RPC
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct VoteRequest {
     pub node_id: u64,
     pub current_term: u64,
@@ -476,7 +522,7 @@ pub struct LogRequest {
     pub suffix: Vec<LogEntry>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LogResponse {
     node_id: u64,
     term: u64,

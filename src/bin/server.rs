@@ -6,6 +6,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
+    time::Instant,
 };
 use tracing::{debug, error, info, trace, warn};
 
@@ -73,6 +74,7 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
+            trace!("Broadcasting");
             server_clone.lock().await.broadcast_current_log().await;
         }
     });
@@ -80,12 +82,22 @@ async fn main() {
     // TODO: Election timeout
     // TODO: Election job
     let election_timeout = server.lock().await.election_timeout();
+    let server_clone = server.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_millis(election_timeout as u64)).await;
+            let election_timeout = Duration::from_millis(election_timeout as u64);
+            tokio::time::sleep(election_timeout).await;
             // TODO Check if election is needed.
             // If heartbeats not received, then:
             trace!("Start new election");
+            let mut server = server_clone.lock().await;
+            let time_elapsed = Instant::now() - election_timeout;
+            if server
+                .last_heartbeat
+                .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
+            {
+                server.start_election().await;
+            }
         }
     });
 
@@ -345,6 +357,7 @@ async fn request_vote(
         log_length,
         last_term,
     };
+    debug!("Receiving vote: {:?}", vote_request);
     let vote_response = server.lock().await.receive_vote(vote_request).await;
     let encoded_vote_response = bincode::serialize(&vote_response).unwrap();
 
