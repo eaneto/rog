@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use tracing::{debug, error, trace};
+use tracing::{debug, error, info, trace};
 
 use bytes::BytesMut;
 use rand::Rng;
@@ -59,7 +59,7 @@ pub struct Server {
     // match_index
     acked_length: HashMap<u64, u64>,
     nodes: HashMap<u64, Node>,
-    pub last_heartbeat: Option<time::Instant>,
+    last_heartbeat: Option<time::Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +77,7 @@ impl Server {
             log: Vec::new(),
             commit_length: 0,
             state: State::Follower,
-            election_timeout: rand::thread_rng().gen_range(150..300),
+            election_timeout: rand::thread_rng().gen_range(1500..3000),
             current_leader: 0,
             votes_received: HashSet::new(),
             sent_length: HashMap::new(),
@@ -91,11 +91,22 @@ impl Server {
         self.election_timeout
     }
 
+    pub fn last_heartbeat(&self) -> Option<time::Instant> {
+        self.last_heartbeat
+    }
+
     pub async fn start_election(&mut self) {
-        self.current_term += 1;
-        self.state = State::Candidate;
-        self.voted_for = Some(self.id);
-        self.votes_received.insert(self.id);
+        if matches!(self.state, State::Leader) {
+            return;
+        }
+
+        if !matches!(self.state, State::Candidate) {
+            self.current_term += 1;
+            self.state = State::Candidate;
+            self.voted_for = Some(self.id);
+            self.votes_received.insert(self.id);
+        }
+
         let last_term = self.last_term();
 
         let vote_request = VoteRequest {
@@ -106,12 +117,24 @@ impl Server {
         };
 
         let nodes = self.nodes.clone();
-        for (_, node) in nodes.into_iter() {
+        for (_, node) in &nodes {
             // TODO Send requests in parallel.
             // TODO Treat error
+            trace!("Sending vote request to {}", &node.id);
             if let Ok(response) = self.send_vote_request(&vote_request, &node).await {
                 self.process_vote_response(response).await;
+            } else {
+                break;
             }
+        }
+
+        // FIXME: If it's still a candidate, reset to follower
+        // previous state.
+        if matches!(self.state, State::Candidate) {
+            self.current_term -= 1;
+            self.state = State::Follower;
+            self.voted_for = None;
+            self.votes_received.remove(&self.id);
         }
     }
 
@@ -173,6 +196,7 @@ impl Server {
 
     async fn process_vote_response(&mut self, vote_response: VoteResponse) {
         if vote_response.term > self.current_term {
+            trace!("Vote response term is higher than current term, becoming follower");
             self.current_term = vote_response.term;
             self.state = State::Follower;
             self.voted_for = None;
@@ -183,7 +207,9 @@ impl Server {
                 && vote_response.vote_in_favor
             {
                 self.votes_received.insert(vote_response.node_id);
+                trace!("Received vote in favor from {}", &vote_response.node_id);
                 if self.votes_received.len() >= (self.nodes.len() - 1) / 2 {
+                    info!("Majority of votes in favor received, becoming leader");
                     self.state = State::Leader;
                     self.current_leader = self.id;
                     // TODO: Cancel election timer
@@ -402,6 +428,7 @@ impl Server {
     }
 
     pub async fn receive_log_request(&mut self, log_request: LogRequest) -> LogResponse {
+        self.last_heartbeat = Some(time::Instant::now());
         if log_request.term > self.current_term {
             self.current_term = log_request.term;
             self.voted_for = None;
