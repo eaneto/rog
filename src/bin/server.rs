@@ -74,7 +74,6 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            //trace!("Broadcasting");
             server_clone.lock().await.broadcast_current_log().await;
         }
     });
@@ -89,13 +88,14 @@ async fn main() {
             tokio::time::sleep(election_timeout).await;
             // TODO Check if election is needed.
             // If heartbeats not received, then:
-            trace!("Start new election");
             let mut server = server_clone.lock().await;
             let time_elapsed = Instant::now() - election_timeout;
-            if server
-                .last_heartbeat()
+            let last_heartbeat = server.last_heartbeat().await;
+            if last_heartbeat
                 .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
+                || last_heartbeat.is_none()
             {
+                warn!("No heartbeats from leader, starting a new election");
                 server.start_election().await;
             }
         }

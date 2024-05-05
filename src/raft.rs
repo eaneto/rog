@@ -1,8 +1,10 @@
 use std::{
     cmp,
     collections::{HashMap, HashSet},
+    sync::{atomic::AtomicU64, Arc},
 };
 
+use crossbeam_skiplist::SkipSet;
 use tracing::{debug, error, info, trace};
 
 use bytes::BytesMut;
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::RwLock,
     time,
 };
 
@@ -43,23 +46,24 @@ enum State {
 pub struct Server {
     id: u64,
     // Need to be stored on disk
-    current_term: u64,
-    voted_for: Option<u64>,
+    current_term: Arc<AtomicU64>,
+    voted_for: Arc<RwLock<Option<u64>>>,
     // TODO: Maybe this could be a skiplist
     log: Vec<LogEntry>,
     // Can be stored in-memory
-    state: State,
+    state: RwLock<State>,
     // commit_index
-    commit_length: u64,
+    commit_length: AtomicU64,
     election_timeout: u16,
-    current_leader: u64,
+    current_leader: AtomicU64,
     votes_received: HashSet<u64>,
+    votes_received_list: SkipSet<u64>,
     // sent_index
     sent_length: HashMap<u64, u64>,
     // match_index
     acked_length: HashMap<u64, u64>,
-    nodes: HashMap<u64, Node>,
-    last_heartbeat: Option<time::Instant>,
+    nodes: RwLock<HashMap<u64, Node>>,
+    last_heartbeat: RwLock<Option<time::Instant>>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,18 +76,19 @@ impl Server {
     pub fn new(id: u64, nodes: HashMap<u64, Node>) -> Server {
         Server {
             id,
-            current_term: 0,
-            voted_for: None,
+            current_term: Arc::new(AtomicU64::new(0)),
+            voted_for: Arc::new(RwLock::new(None)),
             log: Vec::new(),
-            commit_length: 0,
-            state: State::Follower,
-            election_timeout: rand::thread_rng().gen_range(1500..3000),
-            current_leader: 0,
+            state: RwLock::new(State::Follower),
+            commit_length: AtomicU64::new(0),
+            election_timeout: rand::thread_rng().gen_range(150..300),
+            current_leader: AtomicU64::new(0),
             votes_received: HashSet::new(),
+            votes_received_list: SkipSet::new(),
             sent_length: HashMap::new(),
             acked_length: HashMap::new(),
-            nodes,
-            last_heartbeat: None,
+            nodes: RwLock::new(nodes.clone()),
+            last_heartbeat: RwLock::new(None),
         }
     }
 
@@ -91,19 +96,86 @@ impl Server {
         self.election_timeout
     }
 
-    pub fn last_heartbeat(&self) -> Option<time::Instant> {
-        self.last_heartbeat
+    fn current_term(&self) -> u64 {
+        self.current_term
+            .clone()
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn increment_current_term(&self) {
+        self.current_term
+            .clone()
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn decrement_current_term(&self) {
+        self.current_term
+            .clone()
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn update_current_term(&self, value: u64) {
+        self.current_term
+            .clone()
+            .store(value, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn is_candidate(&self) -> bool {
+        matches!(*self.state.read().await, State::Candidate)
+    }
+
+    async fn is_leader(&self) -> bool {
+        matches!(*self.state.read().await, State::Leader)
+    }
+
+    async fn become_leader(&mut self) {
+        let mut state = self.state.write().await;
+        *state = State::Leader;
+    }
+
+    async fn become_follower(&mut self) {
+        let mut state = self.state.write().await;
+        *state = State::Follower;
+    }
+
+    async fn become_candidate(&mut self) {
+        let mut state = self.state.write().await;
+        *state = State::Candidate;
+    }
+
+    fn commit_length(&self) -> u64 {
+        self.commit_length.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn increment_commit_length(&self) {
+        self.commit_length
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn update_commit_length(&self, value: u64) {
+        self.commit_length
+            .store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub async fn last_heartbeat(&self) -> Option<time::Instant> {
+        *self.last_heartbeat.read().await
+    }
+
+    async fn update_last_heartbeat(&mut self) {
+        let mut last_heartbeat = self.last_heartbeat.write().await;
+        *last_heartbeat = Some(time::Instant::now());
     }
 
     pub async fn start_election(&mut self) {
-        if matches!(self.state, State::Leader) {
+        if self.is_leader().await {
             return;
         }
 
-        if !matches!(self.state, State::Candidate) {
-            self.current_term += 1;
-            self.state = State::Candidate;
-            self.voted_for = Some(self.id);
+        if !self.is_candidate().await {
+            self.increment_current_term();
+            self.become_candidate().await;
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = Some(self.id);
             self.votes_received.insert(self.id);
         }
 
@@ -111,12 +183,12 @@ impl Server {
 
         let vote_request = VoteRequest {
             node_id: self.id,
-            current_term: self.current_term,
+            current_term: self.current_term(),
             log_length: 0,
             last_term,
         };
 
-        let nodes = self.nodes.clone();
+        let nodes = self.nodes.read().await.clone();
         for (_, node) in &nodes {
             // TODO Send requests in parallel.
             // TODO Treat error
@@ -130,10 +202,11 @@ impl Server {
 
         // FIXME: If it's still a candidate, reset to follower
         // previous state.
-        if matches!(self.state, State::Candidate) {
-            self.current_term -= 1;
-            self.state = State::Follower;
-            self.voted_for = None;
+        if self.is_candidate().await {
+            self.decrement_current_term();
+            self.become_follower().await;
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = None;
             self.votes_received.remove(&self.id);
         }
     }
@@ -195,28 +268,32 @@ impl Server {
     }
 
     async fn process_vote_response(&mut self, vote_response: VoteResponse) {
-        if vote_response.term > self.current_term {
+        if vote_response.term > self.current_term() {
             trace!("Vote response term is higher than current term, becoming follower");
-            self.current_term = vote_response.term;
-            self.state = State::Follower;
-            self.voted_for = None;
+            self.update_current_term(vote_response.term);
+            self.become_follower().await;
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = None;
             // TODO: Cancel election timer
         } else {
-            if matches!(self.state, State::Candidate)
-                && vote_response.term == self.current_term
+            if self.is_candidate().await
+                && vote_response.term == self.current_term()
                 && vote_response.vote_in_favor
             {
                 self.votes_received.insert(vote_response.node_id);
                 trace!("Received vote in favor from {}", &vote_response.node_id);
-                if self.votes_received.len() >= (self.nodes.len() - 1) / 2 {
+                if self.votes_received.len() >= (self.nodes.read().await.len() - 1) / 2 {
                     info!("Majority of votes in favor received, becoming leader");
-                    self.state = State::Leader;
-                    self.current_leader = self.id;
+                    self.become_leader().await;
+                    self.current_leader
+                        .store(self.id, std::sync::atomic::Ordering::SeqCst);
                     // TODO: Cancel election timer
-                    for (_, node) in &self.nodes {
+                    let nodes = self.nodes.read().await.clone();
+                    for (_, node) in &nodes {
                         self.sent_length.insert(node.id, self.log.len() as u64);
                         self.acked_length.insert(node.id, 0);
-                        self.replicate_log(node).await.unwrap();
+                        // FIXME
+                        let _ = self.replicate_log(node).await;
                     }
                 }
             }
@@ -224,29 +301,32 @@ impl Server {
     }
 
     pub async fn receive_vote(&mut self, vote_request: VoteRequest) -> VoteResponse {
-        if vote_request.current_term > self.current_term {
-            self.current_term = vote_request.current_term;
-            self.state = State::Follower;
-            self.voted_for = None;
+        if vote_request.current_term > self.current_term() {
+            self.update_current_term(vote_request.current_term);
+            self.become_follower().await;
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = None;
         }
         let last_term = self.last_term();
         let ok = (vote_request.last_term > last_term)
             || (vote_request.last_term == last_term
                 && vote_request.log_length >= self.log.len() as u64);
-        let response = if vote_request.current_term == self.current_term
+        let voted_for = self.voted_for.read().await;
+        let response = if vote_request.current_term == self.current_term()
             && ok
-            && (self.voted_for.is_none() || self.voted_for == Some(vote_request.node_id))
+            && (voted_for.is_none() || *voted_for == Some(vote_request.node_id))
         {
-            self.voted_for = Some(vote_request.node_id);
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = Some(vote_request.node_id);
             VoteResponse {
                 node_id: self.id,
-                term: self.current_term,
+                term: self.current_term(),
                 vote_in_favor: true,
             }
         } else {
             VoteResponse {
                 node_id: self.id,
-                term: self.current_term,
+                term: self.current_term(),
                 vote_in_favor: false,
             }
         };
@@ -265,12 +345,12 @@ impl Server {
     // Log replication
 
     pub async fn broadcast_message(&mut self, message: BytesMut) {
-        if matches!(self.state, State::Leader) {
+        if self.is_leader().await {
             self.log.push(LogEntry {
-                term: self.current_term,
+                term: self.current_term(),
                 message,
             });
-            self.acked_length.insert(self.id, self.current_term);
+            self.acked_length.insert(self.id, self.current_term());
             self.broadcast_current_log().await;
         } else {
             unimplemented!("Leader forwarding not implemented yet")
@@ -278,9 +358,10 @@ impl Server {
     }
 
     pub async fn broadcast_current_log(&mut self) {
-        if matches!(self.state, State::Leader) {
-            debug!("Starting log broadcast");
-            for (_, node) in &self.nodes.clone() {
+        if self.is_leader().await {
+            trace!("Starting log broadcast");
+            let nodes = self.nodes.read().await.clone();
+            for (_, node) in &nodes {
                 if let Ok(response) = self.replicate_log(node).await {
                     self.process_log_response(response).await;
                 }
@@ -301,10 +382,10 @@ impl Server {
                 };
                 LogRequest {
                     leader_id: self.id,
-                    term: self.current_term,
+                    term: self.current_term(),
                     prefix_length,
                     prefix_term,
-                    leader_commit: self.commit_length,
+                    leader_commit: self.commit_length(),
                     suffix: suffix.to_vec(),
                 }
             }
@@ -314,10 +395,10 @@ impl Server {
                 debug!("Sending heartbeat to replicas");
                 LogRequest {
                     leader_id: self.id,
-                    term: self.current_term,
+                    term: self.current_term(),
                     prefix_length: 0,
                     prefix_term: 0,
-                    leader_commit: self.commit_length,
+                    leader_commit: self.commit_length(),
                     suffix: Vec::new(),
                 }
             }
@@ -389,24 +470,25 @@ impl Server {
                     return Err("Unable to deserialize server response");
                 }
             };
-            debug!("Received successful response from {}", &node.id);
+            trace!("Received successful response from {}", &node.id);
             Ok(response)
         } else {
-            debug!("Received failed response from {}", &node.id);
+            trace!("Received failed response from {}", &node.id);
             Err("Response is not successful")
         }
     }
 
     async fn process_log_response(&mut self, log_response: LogResponse) {
-        if log_response.term > self.current_term {
-            self.current_term = log_response.term;
-            self.state = State::Follower;
-            self.voted_for = None;
+        if log_response.term > self.current_term() {
+            self.update_current_term(log_response.term);
+            self.become_follower().await;
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = None;
             // TODO: Cancel election timer
             return;
         }
 
-        if log_response.term == self.current_term && matches!(self.state, State::Leader) {
+        if log_response.term == self.current_term() && self.is_leader().await {
             if log_response.successful
                 && &log_response.ack >= self.acked_length.get(&log_response.node_id).unwrap()
             {
@@ -420,7 +502,9 @@ impl Server {
                     log_response.node_id,
                     self.sent_length.get(&log_response.node_id).unwrap() - 1,
                 );
-                let node = self.nodes.get(&log_response.node_id).unwrap();
+
+                let nodes = self.nodes.read().await;
+                let node = nodes.get(&log_response.node_id).unwrap();
                 // TODO: ?
                 self.replicate_log(node).await;
             }
@@ -428,58 +512,61 @@ impl Server {
     }
 
     pub async fn receive_log_request(&mut self, log_request: LogRequest) -> LogResponse {
-        self.last_heartbeat = Some(time::Instant::now());
-        if log_request.term > self.current_term {
-            self.current_term = log_request.term;
-            self.voted_for = None;
+        self.update_last_heartbeat().await;
+        if log_request.term > self.current_term() {
+            self.update_current_term(log_request.term);
+            let mut voted_for = self.voted_for.write().await;
+            *voted_for = None;
             // TODO: Cancel election timer
         }
         // TODO: Is this the correct condition? Should the state be
         // modified every single time?
-        if log_request.term == self.current_term {
-            self.state = State::Follower;
-            self.current_leader = log_request.leader_id;
+        if log_request.term == self.current_term() {
+            self.become_follower().await;
+            self.current_leader
+                .store(log_request.leader_id, std::sync::atomic::Ordering::SeqCst);
         }
 
         let ok = (self.log.len() >= log_request.prefix_length)
             && (log_request.prefix_length == 0
                 || self.log[log_request.prefix_length - 1].term == log_request.prefix_term);
-        if log_request.term == self.current_term && ok {
+        if log_request.term == self.current_term() && ok {
             let ack = log_request.prefix_length + log_request.suffix.len();
             self.send_append_entries(log_request).await;
             let response = LogResponse {
                 node_id: self.id,
-                term: self.current_term,
+                term: self.current_term(),
                 ack: ack as u64,
                 successful: true,
             };
-            debug!("Sending log response {:?}", response);
+            trace!("Sending log response {:?}", response);
             response
         } else {
             let response = LogResponse {
                 node_id: self.id,
-                term: self.current_term,
+                term: self.current_term(),
                 ack: 0,
                 successful: false,
             };
-            debug!("Sending log response {:?}", response);
+            trace!("Sending log response {:?}", response);
             response
         }
     }
 
     async fn commit_log_entries(&mut self) {
-        while self.commit_length < self.log.len() as u64 {
+        while self.commit_length() < self.log.len() as u64 {
             let mut acks = 0;
-            for (_, node) in &self.nodes {
+            let nodes = self.nodes.read().await.clone();
+            for (_, node) in &nodes {
                 let acked_length = self.acked_length.get(&node.id).unwrap();
-                if *acked_length > self.commit_length {
+                if *acked_length > self.commit_length() {
                     acks += 1;
                 }
             }
 
-            if acks >= (self.nodes.len() + 1) / 2 {
+            if acks >= (self.nodes.read().await.len() + 1) / 2 {
                 // TODO: Deliver log
-                self.commit_length += 1;
+                self.increment_commit_length();
             } else {
                 // No consensus
                 break;
@@ -507,11 +594,11 @@ impl Server {
             }
         }
 
-        if log_request.leader_commit > self.commit_length {
-            for _ in (self.commit_length)..(log_request.leader_commit - 1) {
+        if log_request.leader_commit > self.commit_length() {
+            for _ in (self.commit_length())..(log_request.leader_commit - 1) {
                 // TODO
             }
-            self.commit_length = log_request.leader_commit;
+            self.update_commit_length(log_request.leader_commit);
         }
     }
 }
