@@ -311,12 +311,11 @@ impl Server {
         let ok = (vote_request.last_term > last_term)
             || (vote_request.last_term == last_term
                 && vote_request.log_length >= self.log.len() as u64);
-        let voted_for = self.voted_for.read().await;
+        let mut voted_for = self.voted_for.write().await;
         let response = if vote_request.current_term == self.current_term()
             && ok
             && (voted_for.is_none() || *voted_for == Some(vote_request.node_id))
         {
-            let mut voted_for = self.voted_for.write().await;
             *voted_for = Some(vote_request.node_id);
             VoteResponse {
                 node_id: self.id,

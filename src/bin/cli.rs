@@ -42,6 +42,7 @@ enum Command {
         #[clap(long, short)]
         group: String,
     },
+    StartElection,
 }
 
 #[derive(Debug, Parser)]
@@ -167,6 +168,30 @@ fn main() {
                     }
                 }
                 Err(e) => println!("Unable to fetch log\n{e}"),
+            }
+        }
+        Command::StartElection => {
+            let command_byte = (6_u8).to_be_bytes();
+            let mut command = Vec::new();
+            command.extend(command_byte);
+
+            if let Err(e) = stream.write_all(&command) {
+                println!("Unable to create log\n{e}");
+                return;
+            }
+
+            let mut buf = [0; 1024];
+            match stream.read(&mut buf) {
+                Ok(_) => {
+                    if buf[0] == 0 {
+                        println!("Election started");
+                    } else {
+                        println!("Unable to start election");
+                        let error_message = parse_error(&buf);
+                        println!("{error_message}");
+                    }
+                }
+                Err(e) => println!("Unable to start election\n{e}"),
             }
         }
     }

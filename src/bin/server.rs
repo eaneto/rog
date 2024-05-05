@@ -67,7 +67,8 @@ async fn main() {
     // If a new node is up it immediately tries to become the leader,
     // if there's already a leader in the cluster it will receive
     // other node's response and become a follower.
-    server.lock().await.start_election().await;
+    // FIXME: Fix deadlock on election
+    //server.lock().await.start_election().await;
 
     // TODO: Broadcast job
     let server_clone = server.clone();
@@ -80,26 +81,26 @@ async fn main() {
 
     // TODO: Election timeout
     // TODO: Election job
-    let election_timeout = server.lock().await.election_timeout();
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        loop {
-            let election_timeout = Duration::from_millis(election_timeout as u64);
-            tokio::time::sleep(election_timeout).await;
-            // TODO Check if election is needed.
-            // If heartbeats not received, then:
-            let mut server = server_clone.lock().await;
-            let time_elapsed = Instant::now() - election_timeout;
-            let last_heartbeat = server.last_heartbeat().await;
-            if last_heartbeat
-                .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
-                || last_heartbeat.is_none()
-            {
-                warn!("No heartbeats from leader, starting a new election");
-                server.start_election().await;
-            }
-        }
-    });
+    //let election_timeout = server.lock().await.election_timeout();
+    //let server_clone = server.clone();
+    //tokio::spawn(async move {
+    //
+    //        let election_timeout = Duration::from_millis(election_timeout as u64);
+    //        tokio::time::sleep(election_timeout).await;
+    //        // TODO Check if election is needed.
+    //        // If heartbeats not received, then:
+    //        let mut server = server_clone.lock().await;
+    //        let time_elapsed = Instant::now() - election_timeout;
+    //        let last_heartbeat = server.last_heartbeat().await;
+    //        if last_heartbeat
+    //            .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
+    //            || last_heartbeat.is_none()
+    //        {
+    //            warn!("No heartbeats from leader, starting a new election");
+    //            server.start_election().await;
+    //        }
+    //    }
+    //});
 
     handle_connections(server, listener, logs, log_segments).await;
 }
@@ -212,6 +213,13 @@ async fn handle_connection(
                 suffix,
             )
             .await
+        }
+        Command::StartElection => {
+            server.lock().await.start_election().await;
+
+            let mut buf = Vec::new();
+            buf.extend((0_u8).to_be_bytes());
+            buf
         }
         _ => {
             debug!("command not created yet");

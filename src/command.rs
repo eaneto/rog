@@ -9,6 +9,7 @@ const FETCH_COMMAND_BYTE: u8 = 2;
 const ACK_COMMAND_BYTE: u8 = 3;
 const REQUEST_VOTE_COMMAND_BYTE: u8 = 4;
 const LOG_REQUEST_COMMAND_BYTE: u8 = 5;
+const START_ELECTION_COMMAND_BYTE: u8 = 6;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -45,6 +46,7 @@ pub enum Command {
         leader_commit: u64,
         suffix: Vec<raft::LogEntry>,
     },
+    StartElection,
     Unknown,
 }
 
@@ -61,6 +63,7 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, &str> {
         ACK_COMMAND_BYTE => parse_ack_command(buf),
         REQUEST_VOTE_COMMAND_BYTE => parse_request_vote_command(buf),
         LOG_REQUEST_COMMAND_BYTE => parse_log_request_command(buf),
+        START_ELECTION_COMMAND_BYTE => Ok(Command::StartElection),
         _ => Ok(Command::Unknown),
     }
 }
