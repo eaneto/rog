@@ -272,7 +272,7 @@ fn parse_log_request_command(buf: &[u8]) -> Result<Command, &str> {
 
 #[cfg(test)]
 mod tests {
-    use crate::command::*;
+    use crate::{command::*, raft::VoteRequest};
 
     #[test]
     fn parse_create_log_command() {
@@ -636,8 +636,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_command() {
+    fn parse_request_vote_command() {
         let command_byte = 4_u8.to_be_bytes();
+        let request = raft::VoteRequest {
+            node_id: 1,
+            current_term: 2,
+            log_length: 10,
+            last_term: 1,
+        };
+        let request_bytes = bincode::serialize(&request).unwrap();
+        let length = request_bytes.len().to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(length);
+        buf.extend(request_bytes);
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_ok());
+        assert_eq!(
+            command.unwrap(),
+            Command::RequestVote {
+                node_id: request.node_id,
+                current_term: request.current_term,
+                log_length: request.log_length,
+                last_term: request.last_term
+            }
+        )
+    }
+
+    #[test]
+    fn parse_unknown_command() {
+        let command_byte = 7_u8.to_be_bytes();
         let command = parse_command(&command_byte);
 
         assert!(command.is_ok());
