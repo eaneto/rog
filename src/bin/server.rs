@@ -13,6 +13,7 @@ use tracing::{debug, error, info, trace, warn};
 use rog::{
     command::{parse_command, Command},
     log::LogSegments,
+    raft::Server,
 };
 use rog::{
     log::{load_logs, CommitLog, InternalMessage, Logs},
@@ -63,12 +64,18 @@ async fn main() {
     }
 
     println!("{:?}", nodes);
-    let server = Arc::new(Mutex::new(raft::Server::new(args.id, nodes)));
+    let server = Arc::new(Mutex::new(Server::new(args.id, nodes)));
     // If a new node is up it immediately tries to become the leader,
     // if there's already a leader in the cluster it will receive
     // other node's response and become a follower.
-    // FIXME: Fix deadlock on election
-    //server.lock().await.start_election().await;
+    // FIXME: Possible deadlock
+    // 1. Node A goes down
+    // 2. A comes back up
+    // 3. A initializes election process, sends vote request to B and C.
+    // 4. concurrently B(who is now leader), sends broadheart
+    // beat to A, locks server while waiting for answer.
+    // 5. deadlock, A waits for B response while B waits for A response.
+    server.lock().await.start_election().await;
 
     // TODO: Broadcast job
     let server_clone = server.clone();
@@ -81,28 +88,32 @@ async fn main() {
 
     // TODO: Election timeout
     // TODO: Election job
-    //let election_timeout = server.lock().await.election_timeout();
-    //let server_clone = server.clone();
-    //tokio::spawn(async move {
-    //
-    //        let election_timeout = Duration::from_millis(election_timeout as u64);
-    //        tokio::time::sleep(election_timeout).await;
-    //        // TODO Check if election is needed.
-    //        // If heartbeats not received, then:
-    //        let mut server = server_clone.lock().await;
-    //        let time_elapsed = Instant::now() - election_timeout;
-    //        let last_heartbeat = server.last_heartbeat().await;
-    //        if last_heartbeat
-    //            .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
-    //            || last_heartbeat.is_none()
-    //        {
-    //            warn!("No heartbeats from leader, starting a new election");
-    //            server.start_election().await;
-    //        }
-    //    }
-    //});
+    let election_timeout = server.lock().await.election_timeout();
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        loop {
+            let election_timeout = Duration::from_millis(election_timeout as u64);
+            tokio::time::sleep(election_timeout).await;
+            let mut server = server_clone.lock().await;
+            if no_hearbeats_received_from_leader(election_timeout, &server).await {
+                warn!("No heartbeats from leader, starting a new election");
+                server.start_election().await;
+            }
+        }
+    });
 
     handle_connections(server, listener, logs, log_segments).await;
+}
+
+/// Checks if the last heartbeat received from the leader(if there is
+/// a last heartbeat) has passed the election timeout.
+async fn no_hearbeats_received_from_leader(election_timeout: Duration, server: &Server) -> bool {
+    let time_elapsed = Instant::now() - election_timeout;
+    let last_heartbeat = server.last_heartbeat().await;
+    (last_heartbeat
+        .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
+        || last_heartbeat.is_none())
+        && !server.is_leader().await
 }
 
 async fn handle_connections(

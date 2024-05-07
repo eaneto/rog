@@ -124,7 +124,7 @@ impl Server {
         matches!(*self.state.read().await, State::Candidate)
     }
 
-    async fn is_leader(&self) -> bool {
+    pub async fn is_leader(&self) -> bool {
         matches!(*self.state.read().await, State::Leader)
     }
 
