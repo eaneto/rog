@@ -1,8 +1,4 @@
-use std::{
-    cmp,
-    collections::{HashMap, HashSet},
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::{cmp, collections::HashMap, sync::atomic::AtomicU64, time::Duration};
 
 use crossbeam_skiplist::{SkipMap, SkipSet};
 use tracing::{debug, error, info, trace};
@@ -14,7 +10,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::RwLock,
-    time,
+    time::{self, Instant},
 };
 
 /// The cluster must have at least 5 servers.
@@ -46,8 +42,8 @@ enum State {
 pub struct Server {
     id: NodeId,
     // Need to be stored on disk
-    current_term: Arc<AtomicU64>,
-    voted_for: Arc<RwLock<Option<NodeId>>>,
+    current_term: AtomicU64,
+    voted_for: RwLock<Option<NodeId>>,
     log: RwLock<Vec<LogEntry>>,
     // Can be stored in-memory
     state: RwLock<State>,
@@ -76,8 +72,8 @@ impl Server {
     pub fn new(id: u64, nodes: HashMap<u64, Node>) -> Server {
         Server {
             id,
-            current_term: Arc::new(AtomicU64::new(0)),
-            voted_for: Arc::new(RwLock::new(None)),
+            current_term: AtomicU64::new(0),
+            voted_for: RwLock::new(None),
             log: RwLock::new(Vec::new()),
             state: RwLock::new(State::Follower),
             commit_length: AtomicU64::new(0),
@@ -92,26 +88,21 @@ impl Server {
     }
 
     fn current_term(&self) -> u64 {
-        self.current_term
-            .clone()
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.current_term.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn increment_current_term(&self) {
         self.current_term
-            .clone()
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn decrement_current_term(&self) {
         self.current_term
-            .clone()
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn update_current_term(&self, value: u64) {
         self.current_term
-            .clone()
             .store(value, std::sync::atomic::Ordering::SeqCst)
     }
 
@@ -189,6 +180,18 @@ impl Server {
 
     async fn log_length(&self) -> usize {
         self.log.read().await.len()
+    }
+
+    /// Checks if the last heartbeat received from the leader(if there
+    /// is a last heartbeat) has passed the election timeout.
+    pub async fn no_hearbeats_received_from_leader(&self) -> bool {
+        let election_timeout = Duration::from_millis(self.election_timeout() as u64);
+        let time_elapsed = Instant::now() - election_timeout;
+        let last_heartbeat = self.last_heartbeat().await;
+        (last_heartbeat
+            .is_some_and(|heartbeat| time_elapsed.duration_since(heartbeat) > election_timeout)
+            || last_heartbeat.is_none())
+            && !self.is_leader().await
     }
 
     pub async fn start_election(&mut self) {
@@ -675,4 +678,66 @@ pub struct LogResponse {
     term: u64,
     ack: u64,
     successful: bool,
+}
+
+#[cfg(test)]
+mod tests {
+
+    use crate::raft::*;
+
+    #[tokio::test]
+    async fn should_start_a_new_election_with_no_hearbeats() {
+        let server = Server::new(1, HashMap::new());
+
+        let result = server.no_hearbeats_received_from_leader().await;
+
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn should_start_a_new_election_with_outdated_hearbeats() {
+        let one_second_ago = Instant::now() - Duration::from_secs(1);
+        let server = Server {
+            id: 1,
+            current_term: AtomicU64::new(0),
+            voted_for: RwLock::new(None),
+            log: RwLock::new(Vec::new()),
+            state: RwLock::new(State::Follower),
+            commit_length: AtomicU64::new(0),
+            election_timeout: rand::thread_rng().gen_range(150..300),
+            current_leader: AtomicU64::new(0),
+            votes_received: SkipSet::new(),
+            sent_length: SkipMap::new(),
+            acked_length: SkipMap::new(),
+            nodes: RwLock::new(HashMap::new()),
+            last_heartbeat: RwLock::new(Option::Some(one_second_ago)),
+        };
+
+        let result = server.no_hearbeats_received_from_leader().await;
+
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn should_not_start_a_new_election() {
+        let server = Server {
+            id: 1,
+            current_term: AtomicU64::new(0),
+            voted_for: RwLock::new(None),
+            log: RwLock::new(Vec::new()),
+            state: RwLock::new(State::Follower),
+            commit_length: AtomicU64::new(0),
+            election_timeout: rand::thread_rng().gen_range(150..300),
+            current_leader: AtomicU64::new(0),
+            votes_received: SkipSet::new(),
+            sent_length: SkipMap::new(),
+            acked_length: SkipMap::new(),
+            nodes: RwLock::new(HashMap::new()),
+            last_heartbeat: RwLock::new(Option::Some(Instant::now())),
+        };
+
+        let result = server.no_hearbeats_received_from_leader().await;
+
+        assert!(!result);
+    }
 }

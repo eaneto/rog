@@ -6,7 +6,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
-    time::Instant,
+    time::{timeout, Instant},
 };
 use tracing::{debug, error, info, trace, warn};
 
@@ -82,7 +82,9 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            server_clone.lock().await.broadcast_current_log().await;
+            if let Ok(mut server) = timeout(Duration::from_millis(200), server_clone.lock()).await {
+                server.broadcast_current_log().await;
+            }
         }
     });
 
@@ -94,26 +96,17 @@ async fn main() {
         loop {
             let election_timeout = Duration::from_millis(election_timeout as u64);
             tokio::time::sleep(election_timeout).await;
-            let mut server = server_clone.lock().await;
-            if no_hearbeats_received_from_leader(election_timeout, &server).await {
-                warn!("No heartbeats from leader, starting a new election");
-                server.start_election().await;
+            if let Ok(mut server) = timeout(Duration::from_millis(300), server_clone.lock()).await {
+                trace!("Election timer off");
+                if server.no_hearbeats_received_from_leader().await {
+                    warn!("No heartbeats from leader, starting a new election");
+                    server.start_election().await;
+                }
             }
         }
     });
 
     handle_connections(server, listener, logs, log_segments).await;
-}
-
-/// Checks if the last heartbeat received from the leader(if there is
-/// a last heartbeat) has passed the election timeout.
-async fn no_hearbeats_received_from_leader(election_timeout: Duration, server: &Server) -> bool {
-    let time_elapsed = Instant::now() - election_timeout;
-    let last_heartbeat = server.last_heartbeat().await;
-    (last_heartbeat
-        .is_some_and(|heartbeat| heartbeat.duration_since(time_elapsed) > election_timeout)
-        || last_heartbeat.is_none())
-        && !server.is_leader().await
 }
 
 async fn handle_connections(
@@ -377,13 +370,17 @@ async fn request_vote(
         last_term,
     };
     debug!("Receiving vote: {:?}", vote_request);
-    let vote_response = server.lock().await.receive_vote(vote_request).await;
-    let encoded_vote_response = bincode::serialize(&vote_response).unwrap();
-
     let mut buf = Vec::new();
-    buf.extend((0_u8).to_be_bytes());
-    buf.extend(encoded_vote_response.len().to_be_bytes());
-    buf.extend(encoded_vote_response);
+    if let Ok(mut server) = timeout(Duration::from_millis(50), server.lock()).await {
+        let vote_response = server.receive_vote(vote_request).await;
+        let encoded_vote_response = bincode::serialize(&vote_response).unwrap();
+        buf.extend((0_u8).to_be_bytes());
+        buf.extend(encoded_vote_response.len().to_be_bytes());
+        buf.extend(encoded_vote_response);
+    } else {
+        buf.extend((1_u8).to_be_bytes());
+    }
+
     buf
 }
 
@@ -404,13 +401,18 @@ async fn log_request(
         leader_commit,
         suffix,
     };
-    let log_response = server.lock().await.receive_log_request(log_request).await;
-    let encoded_log_response = bincode::serialize(&log_response).unwrap();
 
     let mut buf = Vec::new();
-    buf.extend((0_u8).to_be_bytes());
-    buf.extend(encoded_log_response.len().to_be_bytes());
-    buf.extend(encoded_log_response);
+    if let Ok(mut server) = timeout(Duration::from_millis(50), server.lock()).await {
+        let log_response = server.receive_log_request(log_request).await;
+        let encoded_log_response = bincode::serialize(&log_response).unwrap();
+        buf.extend((0_u8).to_be_bytes());
+        buf.extend(encoded_log_response.len().to_be_bytes());
+        buf.extend(encoded_log_response);
+    } else {
+        buf.extend((1_u8).to_be_bytes());
+    }
+
     buf
 }
 
