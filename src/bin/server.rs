@@ -6,7 +6,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
-    time::{timeout, Instant},
+    time::timeout,
 };
 use tracing::{debug, error, info, trace, warn};
 
