@@ -70,7 +70,6 @@ async fn main() {
     // other node's response and become a follower.
     server.lock().await.start_election().await;
 
-    // TODO: Broadcast job
     let server_clone = server.clone();
     tokio::spawn(async move {
         loop {
@@ -81,8 +80,6 @@ async fn main() {
         }
     });
 
-    // TODO: Election timeout
-    // TODO: Election job
     let election_timeout = server.lock().await.election_timeout();
     let server_clone = server.clone();
     tokio::spawn(async move {
