@@ -240,12 +240,12 @@ fn parse_request_vote_command(buf: &[u8]) -> Result<Command, &str> {
     let vote_request_buffer = buf.get(9..(9 + length)).unwrap();
     let vote_request: raft::VoteRequest = bincode::deserialize(vote_request_buffer).unwrap();
 
-    return Ok(Command::RequestVote {
+    Ok(Command::RequestVote {
         node_id: vote_request.node_id,
         current_term: vote_request.current_term,
         log_length: vote_request.log_length,
         last_term: vote_request.last_term,
-    });
+    })
 }
 
 fn parse_log_request_command(buf: &[u8]) -> Result<Command, &str> {
@@ -260,19 +260,19 @@ fn parse_log_request_command(buf: &[u8]) -> Result<Command, &str> {
     let log_request_buffer = buf.get(9..(9 + length)).unwrap();
     let log_request: raft::LogRequest = bincode::deserialize(log_request_buffer).unwrap();
 
-    return Ok(Command::LogRequest {
+    Ok(Command::LogRequest {
         leader_id: log_request.leader_id,
         term: log_request.term,
         prefix_length: log_request.prefix_length,
         prefix_term: log_request.prefix_term,
         leader_commit: log_request.leader_commit,
         suffix: log_request.suffix,
-    });
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{command::*, raft::VoteRequest};
+    use crate::command::*;
 
     #[test]
     fn parse_create_log_command() {

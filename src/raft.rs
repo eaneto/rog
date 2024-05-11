@@ -217,19 +217,15 @@ impl Server {
         };
 
         let nodes = self.nodes.read().await.clone();
-        for (_, node) in &nodes {
+        for node in nodes.values() {
             // TODO Send requests in parallel.
             // TODO Treat error
             trace!("Sending vote request to {}", &node.id);
-            if let Ok(response) = self.send_vote_request(&vote_request, &node).await {
+            if let Ok(response) = self.send_vote_request(&vote_request, node).await {
                 self.process_vote_response(response).await;
-            } else {
-                break;
             }
         }
 
-        // FIXME: If it's still a candidate, reset to follower
-        // previous state.
         if self.is_candidate().await {
             self.decrement_current_term();
             self.become_follower().await;
@@ -303,33 +299,40 @@ impl Server {
             let mut voted_for = self.voted_for.write().await;
             *voted_for = None;
             // TODO: Cancel election timer
-        } else {
-            if self.is_candidate().await
-                && vote_response.term == self.current_term()
-                && vote_response.vote_in_favor
-            {
-                self.vote_on_new_leader(vote_response.node_id);
-                trace!("Received vote in favor from {}", &vote_response.node_id);
-                if self.has_majority_of_votes().await {
-                    info!("Majority of votes in favor received, becoming leader");
-                    self.become_leader().await;
-                    self.current_leader
-                        .store(self.id, std::sync::atomic::Ordering::SeqCst);
-                    // TODO: Cancel election timer
-                    let nodes = self.nodes.read().await.clone();
-                    for (_, node) in &nodes {
-                        self.update_sent_length(node.id, self.log.read().await.len() as u64);
-                        self.acked_length.insert(node.id, 0);
-                        // FIXME
-                        let _ = self.replicate_log(node).await;
-                    }
+        } else if self.is_candidate().await
+            && vote_response.term == self.current_term()
+            && vote_response.vote_in_favor
+        {
+            self.vote_on_new_leader(vote_response.node_id);
+            trace!("Received vote in favor from {}", &vote_response.node_id);
+            if self.has_majority_of_votes().await {
+                info!("Majority of votes in favor received, becoming leader");
+                self.become_leader().await;
+                self.current_leader
+                    .store(self.id, std::sync::atomic::Ordering::SeqCst);
+                // TODO: Cancel election timer
+                let nodes = self.nodes.read().await.clone();
+                for node in nodes.values() {
+                    self.update_sent_length(node.id, self.log.read().await.len() as u64);
+                    self.acked_length.insert(node.id, 0);
+                    // FIXME
+                    let _ = self.replicate_log(node).await;
                 }
             }
         }
     }
 
     async fn has_majority_of_votes(&self) -> bool {
-        self.votes_received.len() >= (self.nodes.read().await.len() - 1) / 2
+        // Each server has a list of other nodes in the cluster, so
+        // the number of nodes is the cluster is the current number of
+        // nodes + 1(itself).
+        let nodes_on_cluster = self.nodes.read().await.len() + 1;
+        // Increments the number of nodes on cluster for dividing up,
+        // e.g. if there are 5 nodes, the majority must be 3, without
+        // the increment diving five by two will result in 2 instead
+        // of 3.
+        let majority = (nodes_on_cluster + 1) / 2;
+        self.votes_received.len() >= majority
     }
 
     pub async fn receive_vote(&mut self, vote_request: VoteRequest) -> VoteResponse {
@@ -344,7 +347,7 @@ impl Server {
             || (vote_request.last_term == last_term
                 && vote_request.log_length >= self.log.read().await.len() as u64);
         let mut voted_for = self.voted_for.write().await;
-        let response = if vote_request.current_term == self.current_term()
+        if vote_request.current_term == self.current_term()
             && ok
             && (voted_for.is_none() || *voted_for == Some(vote_request.node_id))
         {
@@ -360,9 +363,7 @@ impl Server {
                 term: self.current_term(),
                 vote_in_favor: false,
             }
-        };
-
-        response
+        }
     }
 
     async fn last_term(&self) -> u64 {
@@ -393,7 +394,7 @@ impl Server {
         if self.is_leader().await {
             trace!("Starting log broadcast");
             let nodes = self.nodes.read().await.clone();
-            for (_, node) in &nodes {
+            for node in nodes.values() {
                 if let Ok(response) = self.replicate_log(node).await {
                     self.process_log_response(response).await;
                 }
@@ -436,7 +437,7 @@ impl Server {
             }
         };
 
-        self.send_log_request(&node, &request).await
+        self.send_log_request(node, &request).await
     }
 
     // TODO: Handle errors betters, create different error types.
@@ -591,7 +592,7 @@ impl Server {
         while self.commit_length() < self.log_length().await as u64 {
             let mut acks = 0;
             let nodes = self.nodes.read().await.clone();
-            for (_, node) in &nodes {
+            for node in nodes.values() {
                 let acked_length = *self.acked_length.get(&node.id).unwrap().value();
                 if acked_length > self.commit_length() {
                     acks += 1;
@@ -611,7 +612,7 @@ impl Server {
     async fn send_append_entries(&mut self, log_request: LogRequest) {
         let mut log = self.log.write().await;
         let log_length = log.len();
-        if log_request.suffix.len() > 0 && log_length > log_request.prefix_length {
+        if !log_request.suffix.is_empty() && log_length > log_request.prefix_length {
             let index = cmp::min(
                 log_length,
                 log_request.prefix_length + log_request.suffix.len(),
