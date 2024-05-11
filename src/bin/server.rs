@@ -68,13 +68,6 @@ async fn main() {
     // If a new node is up it immediately tries to become the leader,
     // if there's already a leader in the cluster it will receive
     // other node's response and become a follower.
-    // FIXME: Possible deadlock
-    // 1. Node A goes down
-    // 2. A comes back up
-    // 3. A initializes election process, sends vote request to B and C.
-    // 4. concurrently B(who is now leader), sends broadheart
-    // beat to A, locks server while waiting for answer.
-    // 5. deadlock, A waits for B response while B waits for A response.
     server.lock().await.start_election().await;
 
     // TODO: Broadcast job

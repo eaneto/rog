@@ -540,7 +540,7 @@ impl Server {
                 let nodes = self.nodes.read().await;
                 let node = nodes.get(&log_response.node_id).unwrap();
                 // TODO: ?
-                self.replicate_log(node).await;
+                let _ = self.replicate_log(node).await;
             }
         }
     }
