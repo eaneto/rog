@@ -151,8 +151,10 @@ impl Server {
         self.votes_received.insert(self.id);
     }
 
-    fn unvote(&self) {
-        self.votes_received.remove(&self.id);
+    async fn unvote(&self) {
+        let mut voted_for = self.voted_for.write().await;
+        *voted_for = None;
+        self.votes_received.clear();
     }
 
     fn vote_on_new_leader(&self, node: u64) {
@@ -229,9 +231,7 @@ impl Server {
         if self.is_candidate().await {
             self.decrement_current_term();
             self.become_follower().await;
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = None;
-            self.unvote();
+            self.unvote().await;
         }
     }
 
@@ -296,8 +296,7 @@ impl Server {
             trace!("Vote response term is higher than current term, becoming follower");
             self.update_current_term(vote_response.term);
             self.become_follower().await;
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = None;
+            self.unvote().await;
             // TODO: Cancel election timer
         } else if self.is_candidate().await
             && vote_response.term == self.current_term()
@@ -332,15 +331,15 @@ impl Server {
         // the increment diving five by two will result in 2 instead
         // of 3.
         let majority = (nodes_on_cluster + 1) / 2;
-        self.votes_received.len() >= majority
+        let votes_received = self.votes_received.len();
+        votes_received >= majority
     }
 
     pub async fn receive_vote(&mut self, vote_request: VoteRequest) -> VoteResponse {
         if vote_request.current_term > self.current_term() {
             self.update_current_term(vote_request.current_term);
             self.become_follower().await;
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = None;
+            self.unvote().await;
         }
         let last_term = self.last_term().await;
         let ok = (vote_request.last_term > last_term)
@@ -515,8 +514,7 @@ impl Server {
         if log_response.term > self.current_term() {
             self.update_current_term(log_response.term);
             self.become_follower().await;
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = None;
+            self.unvote().await;
             // TODO: Cancel election timer
             return;
         }
@@ -549,8 +547,7 @@ impl Server {
         self.update_last_heartbeat().await;
         if log_request.term > self.current_term() {
             self.update_current_term(log_request.term);
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = None;
+            self.unvote().await;
             // TODO: Cancel election timer
         }
         // TODO: Is this the correct condition? Should the state be
