@@ -13,31 +13,11 @@ use tokio::{
     time::{self, Instant},
 };
 
-/// The cluster must have at least 5 servers.
-
-/// Leader Election:
-/// When a server starts it starts as a follower. Leaders send
-/// heartbeats([AppendEntries] with no log entries) to all followers
-/// to maintain authority.
-
-/// election timeout is a random value between 150 and 300
-/// milliseconds.
-
-/// terms
-
-/// terms are a way to detect obsolete data.
-
-/// Possible states:
 enum State {
     Leader,
     Follower,
     Candidate,
 }
-/// Valid state transitions:
-/// follower -> candidate
-/// candidate -> leader
-/// candidate -> follower
-/// leader -> follower
 
 pub struct Server {
     id: NodeId,
