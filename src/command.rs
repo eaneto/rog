@@ -1,9 +1,15 @@
 use bytes::{BufMut, BytesMut};
 
+use crate::raft;
+use bincode;
+
 const CREATE_LOG_COMMAND_BYTE: u8 = 0;
 const PUBLISH_COMMAND_BYTE: u8 = 1;
 const FETCH_COMMAND_BYTE: u8 = 2;
 const ACK_COMMAND_BYTE: u8 = 3;
+const REQUEST_VOTE_COMMAND_BYTE: u8 = 4;
+const LOG_REQUEST_COMMAND_BYTE: u8 = 5;
+const START_ELECTION_COMMAND_BYTE: u8 = 6;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -26,6 +32,21 @@ pub enum Command {
         log_name: String,
         group: String,
     },
+    RequestVote {
+        node_id: u64,
+        current_term: u64,
+        log_length: u64,
+        last_term: u64,
+    },
+    LogRequest {
+        leader_id: u64,
+        term: u64,
+        prefix_length: usize,
+        prefix_term: u64,
+        leader_commit: u64,
+        suffix: Vec<raft::LogEntry>,
+    },
+    StartElection,
     Unknown,
 }
 
@@ -40,6 +61,9 @@ pub fn parse_command(buf: &[u8]) -> Result<Command, &str> {
         PUBLISH_COMMAND_BYTE => parse_publish_log_command(buf),
         FETCH_COMMAND_BYTE => parse_fetch_log_command(buf),
         ACK_COMMAND_BYTE => parse_ack_command(buf),
+        REQUEST_VOTE_COMMAND_BYTE => parse_request_vote_command(buf),
+        LOG_REQUEST_COMMAND_BYTE => parse_log_request_command(buf),
+        START_ELECTION_COMMAND_BYTE => Ok(Command::StartElection),
         _ => Ok(Command::Unknown),
     }
 }
@@ -201,6 +225,48 @@ fn parse_ack_command(buf: &[u8]) -> Result<Command, &str> {
         log_name: log_name.to_string(),
         partition,
         group: group.to_string(),
+    })
+}
+
+fn parse_request_vote_command(buf: &[u8]) -> Result<Command, &str> {
+    let length = match buf.get(1..9) {
+        Some(length) => length,
+        None => {
+            return Err("Unparseable command, unable to parse length");
+        }
+    };
+
+    let length = usize::from_be_bytes(length.try_into().unwrap());
+    let vote_request_buffer = buf.get(9..(9 + length)).unwrap();
+    let vote_request: raft::VoteRequest = bincode::deserialize(vote_request_buffer).unwrap();
+
+    Ok(Command::RequestVote {
+        node_id: vote_request.node_id,
+        current_term: vote_request.current_term,
+        log_length: vote_request.log_length,
+        last_term: vote_request.last_term,
+    })
+}
+
+fn parse_log_request_command(buf: &[u8]) -> Result<Command, &str> {
+    let length = match buf.get(1..9) {
+        Some(length) => length,
+        None => {
+            return Err("Unparseable command, unable to parse length");
+        }
+    };
+
+    let length = usize::from_be_bytes(length.try_into().unwrap());
+    let log_request_buffer = buf.get(9..(9 + length)).unwrap();
+    let log_request: raft::LogRequest = bincode::deserialize(log_request_buffer).unwrap();
+
+    Ok(Command::LogRequest {
+        leader_id: log_request.leader_id,
+        term: log_request.term,
+        prefix_length: log_request.prefix_length,
+        prefix_term: log_request.prefix_term,
+        leader_commit: log_request.leader_commit,
+        suffix: log_request.suffix,
     })
 }
 
@@ -570,8 +636,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_command() {
+    fn parse_request_vote_command() {
         let command_byte = 4_u8.to_be_bytes();
+        let request = raft::VoteRequest {
+            node_id: 1,
+            current_term: 2,
+            log_length: 10,
+            last_term: 1,
+        };
+        let request_bytes = bincode::serialize(&request).unwrap();
+        let length = request_bytes.len().to_be_bytes();
+        let mut buf = Vec::new();
+        buf.extend(command_byte);
+        buf.extend(length);
+        buf.extend(request_bytes);
+
+        let command = parse_command(&buf);
+
+        assert!(command.is_ok());
+        assert_eq!(
+            command.unwrap(),
+            Command::RequestVote {
+                node_id: request.node_id,
+                current_term: request.current_term,
+                log_length: request.log_length,
+                last_term: request.last_term
+            }
+        )
+    }
+
+    #[test]
+    fn parse_unknown_command() {
+        let command_byte = 7_u8.to_be_bytes();
         let command = parse_command(&command_byte);
 
         assert!(command.is_ok());

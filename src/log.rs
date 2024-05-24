@@ -403,6 +403,10 @@ impl CommitLogReceiver {
         if let Err(e) = log_file.write_all(&entry_in_storage_format).await {
             panic!("Unable to write to log file {segment_filename} {e}");
         }
+
+        if let Err(e) = log_file.sync_all().await {
+            panic!("Unable to fsync log to disk {segment_filename} {e}");
+        }
     }
 
     async fn save_id_file(&self, id: usize, partition: u8) {
