@@ -227,10 +227,23 @@ impl Server {
         buf.extend(encoded_request.len().to_be_bytes());
         buf.extend(encoded_request);
 
-        // TODO: Retry
-        let mut stream = match TcpStream::connect(&node.address).await {
-            Ok(stream) => stream,
-            Err(_) => {
+        let mut retries: u8 = 0;
+        let stream = loop {
+            match TcpStream::connect(&node.address).await {
+                Ok(stream) => break Some(stream),
+                Err(_) => {
+                    if retries >= 3 {
+                        break None;
+                    } else {
+                        retries += 1;
+                    }
+                }
+            }
+        };
+
+        let mut stream = match stream {
+            Some(stream) => stream,
+            None => {
                 error!("Can't connect to node at {}", &node.address);
                 return Err("Can't connect to node");
             }
@@ -432,10 +445,23 @@ impl Server {
         buf.extend(encoded_request.len().to_be_bytes());
         buf.extend(encoded_request);
 
-        // TODO: Retry
-        let mut stream = match TcpStream::connect(&node.address).await {
-            Ok(stream) => stream,
-            Err(_) => {
+        let mut retries: u8 = 0;
+        let stream = loop {
+            match TcpStream::connect(&node.address).await {
+                Ok(stream) => break Some(stream),
+                Err(_) => {
+                    if retries >= 3 {
+                        break None;
+                    } else {
+                        retries += 1;
+                    }
+                }
+            }
+        };
+
+        let mut stream = match stream {
+            Some(stream) => stream,
+            None => {
                 error!("Can't connect to node at {}", &node.address);
                 return Err("Can't connect to node");
             }
