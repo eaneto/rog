@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, sync::atomic::AtomicU64, time::Duration};
+use std::{cmp, collections::HashMap, time::Duration};
 
 use crossbeam_skiplist::{SkipMap, SkipSet};
 use tracing::{debug, error, info, trace};
@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::RwLock,
     time::{self, Instant},
 };
 
@@ -22,22 +21,22 @@ enum State {
 pub struct Server {
     id: NodeId,
     // Need to be stored on disk
-    current_term: AtomicU64,
-    voted_for: RwLock<Option<NodeId>>,
-    log: RwLock<Vec<LogEntry>>,
+    current_term: u64,
+    voted_for: Option<NodeId>,
+    log: Vec<LogEntry>,
     // Can be stored in-memory
-    state: RwLock<State>,
+    state: State,
     // commit_index
-    commit_length: AtomicU64,
+    commit_length: u64,
     election_timeout: u16,
-    current_leader: AtomicU64,
+    current_leader: u64,
     votes_received: SkipSet<NodeId>,
     // sent_index
     sent_length: SkipMap<NodeId, u64>,
     // match_index
     acked_length: SkipMap<NodeId, u64>,
-    nodes: RwLock<HashMap<NodeId, Node>>,
-    last_heartbeat: RwLock<Option<time::Instant>>,
+    nodes: HashMap<NodeId, Node>,
+    last_heartbeat: Option<time::Instant>,
 }
 
 type NodeId = u64;
@@ -52,75 +51,67 @@ impl Server {
     pub fn new(id: u64, nodes: HashMap<u64, Node>) -> Server {
         Server {
             id,
-            current_term: AtomicU64::new(0),
-            voted_for: RwLock::new(None),
-            log: RwLock::new(Vec::new()),
-            state: RwLock::new(State::Follower),
-            commit_length: AtomicU64::new(0),
+            current_term: 0,
+            voted_for: None,
+            log: Vec::new(),
+            state: State::Follower,
+            commit_length: 0,
             election_timeout: rand::thread_rng().gen_range(150..300),
-            current_leader: AtomicU64::new(0),
+            current_leader: 0,
             votes_received: SkipSet::new(),
             sent_length: SkipMap::new(),
             acked_length: SkipMap::new(),
-            nodes: RwLock::new(nodes.clone()),
-            last_heartbeat: RwLock::new(None),
+            nodes: nodes.clone(),
+            last_heartbeat: None,
         }
     }
 
     fn current_term(&self) -> u64 {
-        self.current_term.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn increment_current_term(&self) {
         self.current_term
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn decrement_current_term(&self) {
-        self.current_term
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    fn increment_current_term(&mut self) {
+        self.current_term = self.current_term + 1
     }
 
-    fn update_current_term(&self, value: u64) {
-        self.current_term
-            .store(value, std::sync::atomic::Ordering::SeqCst)
+    fn decrement_current_term(&mut self) {
+        self.current_term = self.current_term - 1
     }
 
-    async fn is_candidate(&self) -> bool {
-        matches!(*self.state.read().await, State::Candidate)
+    fn update_current_term(&mut self, value: u64) {
+        self.current_term = value
     }
 
-    pub async fn is_leader(&self) -> bool {
-        matches!(*self.state.read().await, State::Leader)
+    fn is_candidate(&self) -> bool {
+        matches!(self.state, State::Candidate)
     }
 
-    async fn become_leader(&mut self) {
-        let mut state = self.state.write().await;
-        *state = State::Leader;
+    pub fn is_leader(&self) -> bool {
+        matches!(self.state, State::Leader)
     }
 
-    async fn become_follower(&mut self) {
-        let mut state = self.state.write().await;
-        *state = State::Follower;
+    fn become_leader(&mut self) {
+        self.state = State::Leader;
     }
 
-    async fn become_candidate(&mut self) {
-        let mut state = self.state.write().await;
-        *state = State::Candidate;
+    fn become_follower(&mut self) {
+        self.state = State::Follower;
+    }
+
+    fn become_candidate(&mut self) {
+        self.state = State::Candidate;
     }
 
     fn commit_length(&self) -> u64 {
-        self.commit_length.load(std::sync::atomic::Ordering::SeqCst)
+        self.commit_length
     }
 
-    fn increment_commit_length(&self) {
-        self.commit_length
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn increment_commit_length(&mut self) {
+        self.commit_length = self.commit_length + 1
     }
 
-    fn update_commit_length(&self, value: u64) {
-        self.commit_length
-            .store(value, std::sync::atomic::Ordering::SeqCst);
+    fn update_commit_length(&mut self, value: u64) {
+        self.commit_length = value
     }
 
     pub fn election_timeout(&self) -> u16 {
@@ -131,9 +122,8 @@ impl Server {
         self.votes_received.insert(self.id);
     }
 
-    async fn unvote(&self) {
-        let mut voted_for = self.voted_for.write().await;
-        *voted_for = None;
+    fn unvote(&mut self) {
+        self.voted_for = None;
         self.votes_received.clear();
     }
 
@@ -151,17 +141,16 @@ impl Server {
             .insert(node_id, sent_length_by_node.value() - 1);
     }
 
-    pub async fn last_heartbeat(&self) -> Option<time::Instant> {
-        *self.last_heartbeat.read().await
+    pub fn last_heartbeat(&self) -> Option<time::Instant> {
+        self.last_heartbeat
     }
 
-    async fn update_last_heartbeat(&mut self) {
-        let mut last_heartbeat = self.last_heartbeat.write().await;
-        *last_heartbeat = Some(time::Instant::now());
+    fn update_last_heartbeat(&mut self) {
+        self.last_heartbeat = Some(time::Instant::now())
     }
 
-    async fn log_length(&self) -> usize {
-        self.log.read().await.len()
+    fn log_length(&self) -> usize {
+        self.log.len()
     }
 
     /// Checks if the last heartbeat received from the leader(if there
@@ -169,27 +158,26 @@ impl Server {
     pub async fn no_hearbeats_received_from_leader(&self) -> bool {
         let election_timeout = Duration::from_millis(self.election_timeout() as u64);
         let time_elapsed = Instant::now() - election_timeout;
-        let last_heartbeat = self.last_heartbeat().await;
+        let last_heartbeat = self.last_heartbeat();
         (last_heartbeat
             .is_some_and(|heartbeat| time_elapsed.duration_since(heartbeat) > election_timeout)
             || last_heartbeat.is_none())
-            && !self.is_leader().await
+            && !self.is_leader()
     }
 
     pub async fn start_election(&mut self) {
-        if self.is_leader().await {
+        if self.is_leader() {
             return;
         }
 
-        if !self.is_candidate().await {
+        if !self.is_candidate() {
             self.increment_current_term();
-            self.become_candidate().await;
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = Some(self.id);
+            self.become_candidate();
+            self.voted_for = Some(self.id);
             self.vote_on_self();
         }
 
-        let last_term = self.last_term().await;
+        let last_term = self.last_term();
 
         let vote_request = VoteRequest {
             node_id: self.id,
@@ -198,7 +186,7 @@ impl Server {
             last_term,
         };
 
-        let nodes = self.nodes.read().await.clone();
+        let nodes = self.nodes.clone();
         for node in nodes.values() {
             // TODO Send requests in parallel.
             // TODO Treat error
@@ -208,10 +196,10 @@ impl Server {
             }
         }
 
-        if self.is_candidate().await {
+        if self.is_candidate() {
             self.decrement_current_term();
-            self.become_follower().await;
-            self.unvote().await;
+            self.become_follower();
+            self.unvote();
         }
     }
 
@@ -288,24 +276,23 @@ impl Server {
         if vote_response.term > self.current_term() {
             trace!("Vote response term is higher than current term, becoming follower");
             self.update_current_term(vote_response.term);
-            self.become_follower().await;
-            self.unvote().await;
+            self.become_follower();
+            self.unvote();
             // TODO: Cancel election timer
-        } else if self.is_candidate().await
+        } else if self.is_candidate()
             && vote_response.term == self.current_term()
             && vote_response.vote_in_favor
         {
             self.vote_on_new_leader(vote_response.node_id);
             trace!("Received vote in favor from {}", &vote_response.node_id);
-            if self.has_majority_of_votes().await {
+            if self.has_majority_of_votes() {
                 info!("Majority of votes in favor received, becoming leader");
-                self.become_leader().await;
-                self.current_leader
-                    .store(self.id, std::sync::atomic::Ordering::SeqCst);
+                self.become_leader();
+                self.current_leader = self.id;
                 // TODO: Cancel election timer
-                let nodes = self.nodes.read().await.clone();
+                let nodes = self.nodes.clone();
                 for node in nodes.values() {
-                    self.update_sent_length(node.id, self.log.read().await.len() as u64);
+                    self.update_sent_length(node.id, self.log.len() as u64);
                     self.acked_length.insert(node.id, 0);
                     // FIXME
                     let _ = self.replicate_log(node).await;
@@ -314,11 +301,11 @@ impl Server {
         }
     }
 
-    async fn has_majority_of_votes(&self) -> bool {
+    fn has_majority_of_votes(&self) -> bool {
         // Each server has a list of other nodes in the cluster, so
         // the number of nodes is the cluster is the current number of
         // nodes + 1(itself).
-        let nodes_on_cluster = self.nodes.read().await.len() + 1;
+        let nodes_on_cluster = self.nodes.len() + 1;
         // Increments the number of nodes on cluster for dividing up,
         // e.g. if there are 5 nodes, the majority must be 3, without
         // the increment diving five by two will result in 2 instead
@@ -331,19 +318,18 @@ impl Server {
     pub async fn receive_vote(&mut self, vote_request: VoteRequest) -> VoteResponse {
         if vote_request.current_term > self.current_term() {
             self.update_current_term(vote_request.current_term);
-            self.become_follower().await;
-            self.unvote().await;
+            self.become_follower();
+            self.unvote();
         }
-        let last_term = self.last_term().await;
+        let last_term = self.last_term();
         let ok = (vote_request.last_term > last_term)
             || (vote_request.last_term == last_term
-                && vote_request.log_length >= self.log.read().await.len() as u64);
-        let mut voted_for = self.voted_for.write().await;
+                && vote_request.log_length >= self.log.len() as u64);
         if vote_request.current_term == self.current_term()
             && ok
-            && (voted_for.is_none() || *voted_for == Some(vote_request.node_id))
+            && (self.voted_for.is_none() || self.voted_for == Some(vote_request.node_id))
         {
-            *voted_for = Some(vote_request.node_id);
+            self.voted_for = Some(vote_request.node_id);
             VoteResponse {
                 node_id: self.id,
                 term: self.current_term(),
@@ -358,10 +344,9 @@ impl Server {
         }
     }
 
-    async fn last_term(&self) -> u64 {
-        let log = self.log.read().await;
-        if log.len() > 0 {
-            log[log.len() - 1].term
+    fn last_term(&self) -> u64 {
+        if self.log.len() > 0 {
+            self.log[self.log.len() - 1].term
         } else {
             0
         }
@@ -370,8 +355,8 @@ impl Server {
     // Log replication
 
     pub async fn broadcast_message(&mut self, message: BytesMut) {
-        if self.is_leader().await {
-            self.log.write().await.push(LogEntry {
+        if self.is_leader() {
+            self.log.push(LogEntry {
                 term: self.current_term(),
                 message,
             });
@@ -383,9 +368,9 @@ impl Server {
     }
 
     pub async fn broadcast_current_log(&mut self) {
-        if self.is_leader().await {
+        if self.is_leader() {
             trace!("Starting log broadcast");
-            let nodes = self.nodes.read().await.clone();
+            let nodes = self.nodes.clone();
             for node in nodes.values() {
                 if let Ok(response) = self.replicate_log(node).await {
                     self.process_log_response(response).await;
@@ -399,9 +384,9 @@ impl Server {
         let request = match self.sent_length.get(&node.id) {
             Some(entry) => {
                 let prefix_length = *entry.value() as usize;
-                let suffix = &self.log.read().await[prefix_length..];
+                let suffix = &self.log[prefix_length..];
                 let prefix_term = if prefix_length > 0 {
-                    self.log.read().await[prefix_length - 1].term
+                    self.log[prefix_length - 1].term
                 } else {
                     0
                 };
@@ -519,13 +504,13 @@ impl Server {
     async fn process_log_response(&mut self, log_response: LogResponse) {
         if log_response.term > self.current_term() {
             self.update_current_term(log_response.term);
-            self.become_follower().await;
-            self.unvote().await;
+            self.become_follower();
+            self.unvote();
             // TODO: Cancel election timer
             return;
         }
 
-        if log_response.term == self.current_term() && self.is_leader().await {
+        if log_response.term == self.current_term() && self.is_leader() {
             if log_response.successful
                 && &log_response.ack
                     >= self
@@ -541,8 +526,7 @@ impl Server {
             } else if *self.sent_length.get(&log_response.node_id).unwrap().value() > 0 {
                 self.decrement_sent_length(log_response.node_id);
 
-                let nodes = self.nodes.read().await;
-                let node = nodes.get(&log_response.node_id).unwrap();
+                let node = self.nodes.get(&log_response.node_id).unwrap();
                 // TODO: ?
                 let _ = self.replicate_log(node).await;
             }
@@ -550,24 +534,22 @@ impl Server {
     }
 
     pub async fn receive_log_request(&mut self, log_request: LogRequest) -> LogResponse {
-        self.update_last_heartbeat().await;
+        self.update_last_heartbeat();
         if log_request.term > self.current_term() {
             self.update_current_term(log_request.term);
-            self.unvote().await;
+            self.unvote();
             // TODO: Cancel election timer
         }
         // TODO: Is this the correct condition? Should the state be
         // modified every single time?
         if log_request.term == self.current_term() {
-            self.become_follower().await;
-            self.current_leader
-                .store(log_request.leader_id, std::sync::atomic::Ordering::SeqCst);
+            self.become_follower();
+            self.current_leader = log_request.leader_id;
         }
 
-        let ok = (self.log_length().await >= log_request.prefix_length)
+        let ok = (self.log_length() >= log_request.prefix_length)
             && (log_request.prefix_length == 0
-                || self.log.read().await[log_request.prefix_length - 1].term
-                    == log_request.prefix_term);
+                || self.log[log_request.prefix_length - 1].term == log_request.prefix_term);
         if log_request.term == self.current_term() && ok {
             let ack = log_request.prefix_length + log_request.suffix.len();
             self.send_append_entries(log_request).await;
@@ -592,9 +574,9 @@ impl Server {
     }
 
     async fn commit_log_entries(&mut self) {
-        while self.commit_length() < self.log_length().await as u64 {
+        while self.commit_length() < self.log_length() as u64 {
             let mut acks = 0;
-            let nodes = self.nodes.read().await.clone();
+            let nodes = self.nodes.clone();
             for node in nodes.values() {
                 let acked_length = *self.acked_length.get(&node.id).unwrap().value();
                 if acked_length > self.commit_length() {
@@ -602,7 +584,7 @@ impl Server {
                 }
             }
 
-            if acks >= (self.nodes.read().await.len() + 1) / 2 {
+            if acks >= (self.nodes.len() + 1) / 2 {
                 // TODO: Deliver log
                 self.increment_commit_length();
             } else {
@@ -613,16 +595,15 @@ impl Server {
     }
 
     async fn send_append_entries(&mut self, log_request: LogRequest) {
-        let mut log = self.log.write().await;
-        let log_length = log.len();
+        let log_length = self.log_length();
         if !log_request.suffix.is_empty() && log_length > log_request.prefix_length {
             let index = cmp::min(
                 log_length,
                 log_request.prefix_length + log_request.suffix.len(),
             ) - 1;
             // Log is inconsistent
-            if log[index].term != log_request.suffix[index - log_request.prefix_length].term {
-                *log = log[..log_request.prefix_length - 1].to_vec();
+            if self.log[index].term != log_request.suffix[index - log_request.prefix_length].term {
+                self.log = self.log[..log_request.prefix_length - 1].to_vec();
             }
         }
 
@@ -630,7 +611,7 @@ impl Server {
             let start = log_length - log_request.prefix_length;
             let end = log_request.suffix.len() - 1;
             for i in start..end {
-                log.push(log_request.suffix[i].clone());
+                self.log.push(log_request.suffix[i].clone());
             }
         }
 
@@ -703,18 +684,18 @@ mod tests {
         let one_second_ago = Instant::now() - Duration::from_secs(1);
         let server = Server {
             id: 1,
-            current_term: AtomicU64::new(0),
-            voted_for: RwLock::new(None),
-            log: RwLock::new(Vec::new()),
-            state: RwLock::new(State::Follower),
-            commit_length: AtomicU64::new(0),
+            current_term: 0,
+            voted_for: None,
+            log: Vec::new(),
+            state: State::Follower,
+            commit_length: 0,
             election_timeout: rand::thread_rng().gen_range(150..300),
-            current_leader: AtomicU64::new(0),
+            current_leader: 0,
             votes_received: SkipSet::new(),
             sent_length: SkipMap::new(),
             acked_length: SkipMap::new(),
-            nodes: RwLock::new(HashMap::new()),
-            last_heartbeat: RwLock::new(Option::Some(one_second_ago)),
+            nodes: HashMap::new(),
+            last_heartbeat: Option::Some(one_second_ago),
         };
 
         let result = server.no_hearbeats_received_from_leader().await;
@@ -726,18 +707,18 @@ mod tests {
     async fn should_not_start_a_new_election() {
         let server = Server {
             id: 1,
-            current_term: AtomicU64::new(0),
-            voted_for: RwLock::new(None),
-            log: RwLock::new(Vec::new()),
-            state: RwLock::new(State::Follower),
-            commit_length: AtomicU64::new(0),
+            current_term: 0,
+            voted_for: None,
+            log: Vec::new(),
+            state: State::Follower,
+            commit_length: 0,
             election_timeout: rand::thread_rng().gen_range(150..300),
-            current_leader: AtomicU64::new(0),
+            current_leader: 0,
             votes_received: SkipSet::new(),
             sent_length: SkipMap::new(),
             acked_length: SkipMap::new(),
-            nodes: RwLock::new(HashMap::new()),
-            last_heartbeat: RwLock::new(Option::Some(Instant::now())),
+            nodes: HashMap::new(),
+            last_heartbeat: Option::Some(Instant::now()),
         };
 
         let result = server.no_hearbeats_received_from_leader().await;
