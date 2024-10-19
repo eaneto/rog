@@ -1,10 +1,6 @@
 # Rog
 
-A simple distributed commit log inspired by [Kafka][0].
-
-## TODOs
-
-- Distribute writes to multiple nodes
+A simple messaging system inspired by [Kafka][0].
 
 ## Building
 
